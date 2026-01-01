@@ -310,6 +310,9 @@ pub struct TunnelParams {
     pub mfa_code: Option<String>,
     #[serde(skip)]
     pub config_file: PathBuf,
+    /// Skip device configuration (nmcli managed no). Used by NM plugin where NM manages the device.
+    #[serde(skip)]
+    pub no_device_config: bool,
 }
 
 impl Default for TunnelParams {
@@ -356,6 +359,7 @@ impl Default for TunnelParams {
             transport_type: TransportType::default(),
             mfa_code: None,
             config_file: Self::default_config_path(),
+            no_device_config: false,
         }
     }
 }
@@ -640,6 +644,7 @@ mod tests {
             transport_type: TransportType::Tcpt,
             mfa_code: None,
             config_file: temp_path.to_owned(),
+            no_device_config: false,
         };
 
         assert!(params.save().is_ok());

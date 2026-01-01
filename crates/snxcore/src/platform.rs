@@ -17,6 +17,10 @@ use crate::model::IpsecSession;
 #[cfg(target_os = "linux")]
 mod linux;
 
+// Re-export platform-specific utilities
+#[cfg(target_os = "linux")]
+pub use linux::net::{set_no_device_config, should_skip_device_config};
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlatformFeatures {
     pub ipsec_native: bool,

@@ -13,6 +13,22 @@ use zbus::Connection;
 use crate::{platform::NetworkInterface, util};
 
 static ONLINE_STATE: AtomicBool = AtomicBool::new(true);
+/// When true, skip the "nmcli device set <dev> managed no" command
+/// and skip IP address configuration on the interface.
+/// Used by NM VPN plugin where NetworkManager should manage the device.
+static NO_DEVICE_CONFIG: AtomicBool = AtomicBool::new(false);
+
+/// Set whether to skip device configuration (nmcli managed no, ip addr add).
+/// Call this before starting the tunnel when running as NM plugin.
+pub fn set_no_device_config(value: bool) {
+    tracing::info!("set_no_device_config called with value={}", value);
+    NO_DEVICE_CONFIG.store(value, Ordering::SeqCst);
+}
+
+/// Check if device configuration should be skipped.
+pub fn should_skip_device_config() -> bool {
+    NO_DEVICE_CONFIG.load(Ordering::SeqCst)
+}
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 enum NetworkManagerState {
@@ -117,7 +133,15 @@ impl NetworkInterface for LinuxNetworkInterface {
     }
 
     async fn configure_device(&self, device_name: &str) -> anyhow::Result<()> {
-        util::run_command("nmcli", ["device", "set", device_name, "managed", "no"]).await?;
+        // Skip setting device as unmanaged when running as NM VPN plugin
+        let skip = NO_DEVICE_CONFIG.load(Ordering::SeqCst);
+        tracing::info!("configure_device: device={}, skip_nmcli_managed_no={}", device_name, skip);
+        if !skip {
+            tracing::info!("Running: nmcli device set {} managed no", device_name);
+            util::run_command("nmcli", ["device", "set", device_name, "managed", "no"]).await?;
+        } else {
+            tracing::info!("SKIPPING nmcli managed no for {}", device_name);
+        }
         let opt = format!("net.ipv4.conf.{device_name}.promote_secondaries");
         super::sysctl(opt, "1")?;
         Ok(())
