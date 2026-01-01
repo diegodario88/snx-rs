@@ -1,7 +1,7 @@
 use crate::config::params_from_connection;
 use snxcore::model::params::TunnelParams;
 use snxcore::model::{SessionState, VpnSession};
-use snxcore::platform::set_no_device_config;
+use snxcore::platform::{set_no_device_config, Keychain, Platform, PlatformAccess};
 use snxcore::tunnel::{new_tunnel_connector, TunnelCommand, TunnelConnector, TunnelEvent};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, ToSocketAddrs};
@@ -143,6 +143,42 @@ impl VpnPlugin {
     ) -> fdo::Result<String> {
         info!("NeedSecrets request received");
 
+        // Parse params from connection settings
+        let params = match params_from_connection(&settings) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("Failed to parse params in NeedSecrets: {}", e);
+                return Ok("vpn".to_string());
+            }
+        };
+
+        // Check if we have a username
+        if params.user_name.is_empty() {
+            info!("NeedSecrets: no username, need secrets");
+            return Ok("vpn".to_string());
+        }
+
+        // Check if password is already in the settings
+        if !params.password.is_empty() {
+            info!("NeedSecrets: password found in settings");
+            return Ok("".to_string());
+        }
+
+        // Try to get password from keychain (if no-keychain=false)
+        if !params.no_keychain {
+            debug!("NeedSecrets: checking keychain for user '{}'", params.user_name);
+            if let Ok(_) = Platform::get()
+                .new_keychain()
+                .acquire_password(&params.user_name)
+                .await
+            {
+                info!("NeedSecrets: password found in keychain");
+                return Ok("".to_string());
+            }
+            debug!("NeedSecrets: password not found in keychain");
+        }
+
+        // Check if mfa_token is already provided (for subsequent auth steps)
         if let Some(vpn) = settings.get("vpn") {
             if let Some(secrets) = vpn.get("secrets") {
                 if let Ok(dict) = secrets.downcast_ref::<zvariant::Dict<'_, '_>>() {
@@ -162,7 +198,7 @@ impl VpnPlugin {
             }
         }
 
-        info!("NeedSecrets: returning 'vpn'");
+        info!("NeedSecrets: no credentials found, need secrets");
         Ok("vpn".to_string())
     }
 
@@ -275,10 +311,29 @@ impl VpnPlugin {
         }
 
         // Parse config
-        let params = params_from_connection(&connection)
+        let mut params = params_from_connection(&connection)
             .map_err(|e| fdo::Error::Failed(format!("Config error: {}", e)))?;
 
-        debug!("Parsed params: {:?}", params);
+        // Fetch password from keychain if not provided and no-keychain=false
+        if params.password.is_empty() && !params.no_keychain && !params.user_name.is_empty() {
+            debug!("Attempting to fetch password from keychain for user '{}'", params.user_name);
+            match Platform::get()
+                .new_keychain()
+                .acquire_password(&params.user_name)
+                .await
+            {
+                Ok(password) => {
+                    info!("Password retrieved from keychain");
+                    params.password = password;
+                }
+                Err(e) => {
+                    debug!("Could not get password from keychain: {}", e);
+                }
+            }
+        }
+
+        debug!("Parsed params: server={}, user={}, password_len={}", 
+               params.server_name, params.user_name, params.password.len());
 
         // Get signal emitter
         let iface_ref = conn
@@ -296,11 +351,33 @@ impl VpnPlugin {
             .await
             .map_err(|e| fdo::Error::Failed(format!("Connector error: {}", e)))?;
 
-        // Authenticate
-        let mut session = connector
-            .authenticate()
-            .await
-            .map_err(|e| fdo::Error::Failed(format!("Auth error: {}", e)))?;
+        // Try to restore session if ike_persist is enabled
+        let mut session = if params.ike_persist {
+            debug!("Attempting to restore IKE session");
+            match connector.restore_session().await {
+                Ok(session) => {
+                    info!("IKE session restored successfully");
+                    session
+                }
+                Err(e) => {
+                    debug!("Could not restore IKE session: {}, authenticating normally", e);
+                    // Create new connector and authenticate
+                    connector = new_tunnel_connector(Arc::new(params.clone()))
+                        .await
+                        .map_err(|e| fdo::Error::Failed(format!("Connector error: {}", e)))?;
+                    connector
+                        .authenticate()
+                        .await
+                        .map_err(|e| fdo::Error::Failed(format!("Auth error: {}", e)))?
+                }
+            }
+        } else {
+            // Authenticate normally
+            connector
+                .authenticate()
+                .await
+                .map_err(|e| fdo::Error::Failed(format!("Auth error: {}", e)))?
+        };
 
         let mut mfa_code_used = false;
 
@@ -548,7 +625,7 @@ impl VpnPlugin {
 async fn main() -> anyhow::Result<()> {
     // Try to write to file, but also write to stderr for journalctl
     let file_appender = tracing_appender::rolling::never("/var/tmp", "snx-service.log");
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    let (_non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
     // Use stderr as primary output so logs appear in journalctl
     tracing_subscriber::fmt()
