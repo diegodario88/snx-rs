@@ -380,6 +380,9 @@ impl VpnPlugin {
         };
 
         let mut mfa_code_used = false;
+        // Never use MFA code from initial connection - TOTP codes are time-based
+        // and any saved code will be stale. Only use codes from NewSecrets.
+        let use_mfa_from_params = false;
 
         loop {
             // Extract challenge prompt before match to avoid borrow issues
@@ -399,26 +402,74 @@ impl VpnPlugin {
 
                     if prompt_lower.contains("password") && !params.password.is_empty() {
                         info!("Auto-submitting password");
-                        session = connector
-                            .challenge_code(session.clone(), &params.password)
-                            .await
-                            .map_err(|e| fdo::Error::Failed(format!("Password error: {}", e)))?;
+                        match connector.challenge_code(session.clone(), &params.password).await {
+                            Ok(new_session) => {
+                                session = new_session;
+                            }
+                            Err(e) => {
+                                let err_msg = e.to_string();
+                                if err_msg.contains("Authentication failed") || err_msg.contains("authentication failed") {
+                                    warn!("Password authentication failed for user '{}'", params.user_name);
+                                    
+                                    if interactive {
+                                        // Request new password via UI
+                                        info!("Requesting new password via reprompt");
+                                        return self.request_secrets_with_hints(
+                                            connector, 
+                                            session, 
+                                            params, 
+                                            ctx, 
+                                            "Password incorrect. Please enter your password:",
+                                            vec!["password"]
+                                        ).await;
+                                    }
+                                }
+                                return Err(fdo::Error::Failed(format!("Password error: {}", e)));
+                            }
+                        }
+                    } else if prompt_lower.contains("password") && params.password.is_empty() {
+                        // No password provided - request it
+                        if interactive {
+                            info!("No password provided, requesting via UI");
+                            return self.request_secrets_with_hints(
+                                connector, 
+                                session, 
+                                params, 
+                                ctx, 
+                                "Please enter your password:",
+                                vec!["password"]
+                            ).await;
+                        } else {
+                            return Err(fdo::Error::Failed("Password required".into()));
+                        }
                     } else if let Some(mfa) = &params.mfa_code {
-                        if !mfa_code_used {
+                        // Only use MFA code if it's not empty AND we're allowed to use it
+                        // (use_mfa_from_params is false for initial connection, true after NewSecrets)
+                        debug!("MFA code in params: '{}' (len={}, use_from_params={})", mfa, mfa.len(), use_mfa_from_params);
+                        if !mfa.is_empty() && !mfa_code_used && use_mfa_from_params {
                             info!("Submitting MFA code");
                             mfa_code_used = true;
                             session = connector
                                 .challenge_code(session.clone(), mfa)
                                 .await
                                 .map_err(|e| fdo::Error::Failed(format!("MFA error: {}", e)))?;
-                        } else {
-                            // MFA rejected
+                        } else if mfa_code_used {
+                            // MFA was already used and rejected
                             if interactive {
                                 info!("MFA rejected, requesting new secrets");
                                 let prompt = challenge_prompt.unwrap();
                                 return self.request_secrets(connector, session, params, ctx, &prompt).await;
                             } else {
                                 return Err(fdo::Error::Failed("MFA rejected".into()));
+                            }
+                        } else {
+                            // MFA code is empty, stale, or not allowed - need to request fresh one
+                            if interactive {
+                                info!("MFA required, requesting fresh secrets");
+                                let prompt = challenge_prompt.unwrap();
+                                return self.request_secrets(connector, session, params, ctx, &prompt).await;
+                            } else {
+                                return Err(fdo::Error::Failed("MFA required".into()));
                             }
                         }
                     } else {
@@ -444,6 +495,18 @@ impl VpnPlugin {
         ctx: &SignalEmitter<'_>,
         prompt: &str,
     ) -> fdo::Result<()> {
+        self.request_secrets_with_hints(connector, session, params, ctx, prompt, vec!["mfa_token"]).await
+    }
+
+    async fn request_secrets_with_hints(
+        &self,
+        connector: Box<dyn TunnelConnector + Send>,
+        session: Arc<VpnSession>,
+        params: TunnelParams,
+        ctx: &SignalEmitter<'_>,
+        prompt: &str,
+        hints: Vec<&str>,
+    ) -> fdo::Result<()> {
         // Store pending auth
         {
             let mut inner = self.inner.lock().await;
@@ -455,8 +518,8 @@ impl VpnPlugin {
         }
 
         // Emit SecretsRequired signal
-        info!("Emitting SecretsRequired: '{}'", prompt);
-        VpnPlugin::secrets_required(ctx, prompt, vec!["mfa_token"])
+        info!("Emitting SecretsRequired: '{}' with hints: {:?}", prompt, hints);
+        VpnPlugin::secrets_required(ctx, prompt, hints)
             .await
             .map_err(|e| fdo::Error::Failed(format!("Signal error: {}", e)))?;
 
