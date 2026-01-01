@@ -1,5 +1,6 @@
 use anyhow::Result;
 use snxcore::model::params::TunnelParams;
+use snxcore::util::parse_ipv4_or_subnet;
 use std::collections::HashMap;
 use std::time::Duration;
 use zbus::zvariant::{Dict, OwnedValue, Str};
@@ -74,21 +75,46 @@ fn apply_string_map(map: &HashMap<String, String>, params: &mut TunnelParams) ->
             "search-domains" => {
                 params.search_domains = v.split(',').map(|s| s.trim().to_owned()).collect()
             }
+            "ignore-search-domains" => {
+                params.ignore_search_domains = v.split(',').map(|s| s.trim().to_owned()).collect()
+            }
             "dns-servers" => {
                 params.dns_servers = v
                     .split(',')
                     .flat_map(|s| s.trim().parse().ok())
                     .collect()
             }
+            "ignore-dns-servers" => {
+                params.ignore_dns_servers = v
+                    .split(',')
+                    .flat_map(|s| s.trim().parse().ok())
+                    .collect()
+            }
             "default-route" => params.default_route = v.parse().unwrap_or_default(),
             "no-routing" => params.no_routing = v.parse().unwrap_or_default(),
+            "add-routes" => {
+                params.add_routes = v
+                    .split(',')
+                    .flat_map(|s| parse_ipv4_or_subnet(s.trim()).ok())
+                    .collect()
+            }
+            "ignore-routes" => {
+                params.ignore_routes = v
+                    .split(',')
+                    .flat_map(|s| parse_ipv4_or_subnet(s.trim()).ok())
+                    .collect()
+            }
+            "no-dns" => params.no_dns = v.parse().unwrap_or_default(),
             "ignore-server-cert" => params.ignore_server_cert = v.parse().unwrap_or_default(),
             "tunnel-type" => params.tunnel_type = v.parse().unwrap_or_default(),
+            "ca-cert" => params.ca_cert = v.split(',').map(|s| s.trim().into()).collect(),
             "login-type" => params.login_type = v.clone(),
             "cert-type" => params.cert_type = v.parse().unwrap_or_default(),
             "cert-path" => params.cert_path = Some(v.into()),
             "cert-password" => params.cert_password = Some(v.clone()),
             "cert-id" => params.cert_id = Some(v.clone()),
+            "if-name" => params.if_name = Some(v.clone()),
+            "no-keychain" => params.no_keychain = v.parse().unwrap_or_default(),
             "ike-lifetime" => {
                 params.ike_lifetime = v
                     .parse::<u64>()
@@ -96,6 +122,14 @@ fn apply_string_map(map: &HashMap<String, String>, params: &mut TunnelParams) ->
                     .map_or(Duration::from_secs(28800), Duration::from_secs);
             }
             "ike-persist" => params.ike_persist = v.parse().unwrap_or_default(),
+            "no-keepalive" => params.no_keepalive = v.parse().unwrap_or_default(),
+            "client-mode" => params.client_mode = v.clone(),
+            "set-routing-domains" => params.set_routing_domains = v.parse().unwrap_or_default(),
+            "port-knock" => params.port_knock = v.parse().unwrap_or_default(),
+            "ip-lease-time" => {
+                params.ip_lease_time = v.parse::<u64>().ok().map(Duration::from_secs)
+            }
+            "disable-ipv6" => params.disable_ipv6 = v.parse().unwrap_or_default(),
             "mtu" => params.mtu = v.parse().unwrap_or(1350),
             "transport-type" => params.transport_type = v.parse().unwrap_or_default(),
             _ => {
