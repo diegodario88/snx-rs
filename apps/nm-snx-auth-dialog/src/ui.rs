@@ -14,24 +14,35 @@ pub struct AuthDialog {
 }
 
 impl AuthDialog {
-    pub fn new(app: &Application, connection_name: &str, username: Option<String>, password: Option<String>) -> Rc<Self> {
-        let title_text = if connection_name.is_empty() {
+    pub fn new(
+        app: &Application,
+        connection_name: &str,
+        username: Option<String>,
+        password: Option<String>,
+        mfa_only: bool,
+    ) -> Rc<Self> {
+        let title_text = if mfa_only {
+            if connection_name.is_empty() {
+                "VPN - Enter OTP".to_string()
+            } else {
+                format!("VPN - Enter OTP - {}", connection_name)
+            }
+        } else if connection_name.is_empty() {
             "VPN Authentication".to_string()
         } else {
             format!("VPN Authentication - {}", connection_name)
         };
 
-        // Main Window with Adwaita
+        // Main Window with Adwaita - no fixed height, let content determine size
         let window = ApplicationWindow::builder()
             .application(app)
             .title(&title_text)
             .default_width(400)
-            .default_height(480)
             .modal(true)
             .resizable(false)
             .build();
 
-        // Main Layout Structure using ToolbarView (requires v1_4+)
+        // Main Layout Structure using ToolbarView
         let content = ToolbarView::new();
 
         // Header Bar (Title + Window Controls)
@@ -43,25 +54,31 @@ impl AuthDialog {
             .maximum_size(400)
             .tightening_threshold(300)
             .build();
-            
-        let scroll = gtk4::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk4::PolicyType::Never)
-            .build();
         
+        // Main vertical box - align to start so it doesn't expand
         let vbox = gtk4::Box::new(Orientation::Vertical, 0);
         vbox.set_margin_top(12);
         vbox.set_margin_bottom(12);
         vbox.set_margin_start(12);
         vbox.set_margin_end(12);
+        vbox.set_valign(Align::Start);
 
         // Page & Group for Form Fields
         let page = PreferencesPage::new();
+        
+        let group_title = if mfa_only { "Two-Factor Authentication" } else { "Credentials" };
+        let group_description = if mfa_only {
+            "Enter the OTP code from your authenticator app."
+        } else {
+            "Enter your VPN login details."
+        };
+        
         let group = PreferencesGroup::builder()
-            .title("Credentials")
-            .description("Enter your VPN login details.")
+            .title(group_title)
+            .description(group_description)
             .build();
 
-        // Username Field (EntryRow)
+        // Username Field (EntryRow) - hidden in MFA-only mode
         let username_entry = EntryRow::builder()
             .title("Username")
             .activates_default(true)
@@ -70,8 +87,12 @@ impl AuthDialog {
         if let Some(user) = &username {
             username_entry.set_text(user);
         }
+        
+        if mfa_only {
+            username_entry.set_visible(false);
+        }
 
-        // Password Field (PasswordEntryRow)
+        // Password Field (PasswordEntryRow) - hidden in MFA-only mode
         let password_entry = PasswordEntryRow::builder()
             .title("Password")
             .activates_default(true)
@@ -82,9 +103,14 @@ impl AuthDialog {
             if !pass.is_empty() {
                 password_entry.set_text(pass);
                 password_filled = true;
-                // Hide it if we have a password
-                password_entry.set_visible(false);
             }
+        }
+        
+        if mfa_only {
+            password_entry.set_visible(false);
+        } else if password_filled {
+            // In regular mode, hide password field if already filled
+            password_entry.set_visible(false);
         }
 
         // MFA Token Field (EntryRow)
@@ -93,12 +119,33 @@ impl AuthDialog {
             .activates_default(true)
             .input_purpose(InputPurpose::Number)
             .build();
-        
-        // Hide fields if they are already provided to reduce clutter?
-        // Or keep them visible but disabled/filled? 
-        // User asked: "only prompt for the MFA OTP code"
-        // Let's keep them visible so user knows what account they are logging into, but maybe not editable if passed?
-        // For now, just pre-filling is a good step.
+
+        // Configure max length for OTP (6 digits + 1 separator = 7)
+        mfa_entry.set_max_length(7);
+
+        // Auto-format OTP as user types (e.g., 123456 -> 123-456)
+        mfa_entry.connect_changed(|entry| {
+            let text = entry.text().to_string();
+            
+            // Extract only digits
+            let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
+            
+            // Limit to 6 digits
+            let digits: String = digits.chars().take(6).collect();
+            
+            // Format with separator after 3 digits
+            let formatted = if digits.len() > 3 {
+                format!("{}-{}", &digits[..3], &digits[3..])
+            } else {
+                digits
+            };
+            
+            // Avoid infinite loop - only update if different
+            if text != formatted {
+                entry.set_text(&formatted);
+                entry.set_position(formatted.len() as i32);
+            }
+        });
 
         group.add(&username_entry);
         group.add(&password_entry);
@@ -109,8 +156,8 @@ impl AuthDialog {
         // Action Buttons
         let hbox_buttons = gtk4::Box::new(Orientation::Horizontal, 12);
         hbox_buttons.set_halign(Align::Center);
-        hbox_buttons.set_margin_top(12);
-        hbox_buttons.set_margin_bottom(24);
+        hbox_buttons.set_margin_top(24);
+        hbox_buttons.set_margin_bottom(12);
 
         let cancel_button = gtk4::Button::with_label("Cancel");
         cancel_button.set_width_request(100);
@@ -128,7 +175,10 @@ impl AuthDialog {
         window.set_default_widget(Some(&connect_button));
 
         // Logic for initial focus
-        if username.is_some() && password_filled {
+        if mfa_only {
+            // In MFA-only mode, focus directly on OTP field
+            mfa_entry.grab_focus();
+        } else if username.is_some() && password_filled {
             mfa_entry.grab_focus();
         } else if username.is_some() {
             password_entry.grab_focus();
@@ -136,8 +186,7 @@ impl AuthDialog {
             username_entry.grab_focus();
         }
 
-        scroll.set_child(Some(&vbox));
-        clamp.set_child(Some(&scroll));
+        clamp.set_child(Some(&vbox));
         content.set_content(Some(&clamp));
         
         window.set_content(Some(&content));
