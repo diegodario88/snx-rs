@@ -4,6 +4,17 @@ use gtk4::{Align, Orientation, InputPurpose};
 use libadwaita::{Application, ApplicationWindow, HeaderBar, PreferencesGroup, PreferencesPage, EntryRow, PasswordEntryRow, ToolbarView};
 use std::rc::Rc;
 
+/// UI display mode
+#[derive(Clone, Copy, PartialEq)]
+pub enum AuthMode {
+    /// Show only username and password (no MFA field)
+    PasswordOnly,
+    /// Show only MFA field (username/password hidden, pre-filled)
+    MfaOnly,
+    /// Show all fields (username, password, and MFA)
+    Full,
+}
+
 pub struct AuthDialog {
     pub window: ApplicationWindow,
     pub username_entry: EntryRow,
@@ -19,18 +30,23 @@ impl AuthDialog {
         connection_name: &str,
         username: Option<String>,
         password: Option<String>,
-        mfa_only: bool,
+        mode: AuthMode,
     ) -> Rc<Self> {
-        let title_text = if mfa_only {
-            if connection_name.is_empty() {
-                "VPN - Enter OTP".to_string()
-            } else {
-                format!("VPN - Enter OTP - {}", connection_name)
+        let title_text = match mode {
+            AuthMode::MfaOnly => {
+                if connection_name.is_empty() {
+                    "VPN - Enter OTP".to_string()
+                } else {
+                    format!("VPN - Enter OTP - {}", connection_name)
+                }
             }
-        } else if connection_name.is_empty() {
-            "VPN Authentication".to_string()
-        } else {
-            format!("VPN Authentication - {}", connection_name)
+            _ => {
+                if connection_name.is_empty() {
+                    "VPN Authentication".to_string()
+                } else {
+                    format!("VPN Authentication - {}", connection_name)
+                }
+            }
         };
 
         // Main Window with Adwaita - no fixed height, let content determine size
@@ -66,11 +82,19 @@ impl AuthDialog {
         // Page & Group for Form Fields
         let page = PreferencesPage::new();
         
-        let group_title = if mfa_only { "Two-Factor Authentication" } else { "Credentials" };
-        let group_description = if mfa_only {
-            "Enter the OTP code from your authenticator app."
-        } else {
-            "Enter your VPN login details."
+        let (group_title, group_description) = match mode {
+            AuthMode::MfaOnly => (
+                "Two-Factor Authentication",
+                "Enter the code from your authenticator."
+            ),
+            AuthMode::PasswordOnly => (
+                "Credentials",
+                "Enter your VPN password."
+            ),
+            AuthMode::Full => (
+                "Credentials",
+                "Enter your VPN credentials and OTP code."
+            ),
         };
         
         let group = PreferencesGroup::builder()
@@ -88,7 +112,7 @@ impl AuthDialog {
             username_entry.set_text(user);
         }
         
-        if mfa_only {
+        if mode == AuthMode::MfaOnly {
             username_entry.set_visible(false);
         }
 
@@ -106,14 +130,14 @@ impl AuthDialog {
             }
         }
         
-        if mfa_only {
+        if mode == AuthMode::MfaOnly {
             password_entry.set_visible(false);
         } else if password_filled {
             // In regular mode, hide password field if already filled
             password_entry.set_visible(false);
         }
 
-        // MFA Token Field (EntryRow)
+        // MFA Token Field (EntryRow) - hidden in PasswordOnly mode
         let mfa_entry = EntryRow::builder()
             .title("MFA Token")
             .activates_default(true)
@@ -122,6 +146,11 @@ impl AuthDialog {
 
         // Configure max length for OTP (6 digits + 1 separator = 7)
         mfa_entry.set_max_length(7);
+        
+        // Hide MFA field in PasswordOnly mode
+        if mode == AuthMode::PasswordOnly {
+            mfa_entry.set_visible(false);
+        }
 
         // Auto-format OTP as user types (e.g., 123456 -> 123-456)
         mfa_entry.connect_changed(|entry| {
@@ -175,15 +204,28 @@ impl AuthDialog {
         window.set_default_widget(Some(&connect_button));
 
         // Logic for initial focus
-        if mfa_only {
-            // In MFA-only mode, focus directly on OTP field
-            mfa_entry.grab_focus();
-        } else if username.is_some() && password_filled {
-            mfa_entry.grab_focus();
-        } else if username.is_some() {
-            password_entry.grab_focus();
-        } else {
-            username_entry.grab_focus();
+        match mode {
+            AuthMode::MfaOnly => {
+                // In MFA-only mode, focus directly on OTP field
+                mfa_entry.grab_focus();
+            }
+            AuthMode::PasswordOnly => {
+                // In password-only mode, focus on password if username is filled
+                if username.is_some() {
+                    password_entry.grab_focus();
+                } else {
+                    username_entry.grab_focus();
+                }
+            }
+            AuthMode::Full => {
+                if username.is_some() && password_filled {
+                    mfa_entry.grab_focus();
+                } else if username.is_some() {
+                    password_entry.grab_focus();
+                } else {
+                    username_entry.grab_focus();
+                }
+            }
         }
 
         clamp.set_child(Some(&vbox));

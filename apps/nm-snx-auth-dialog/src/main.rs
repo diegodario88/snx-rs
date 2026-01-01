@@ -6,12 +6,17 @@ use std::collections::HashMap;
 use std::env;
 use std::io::{self, BufRead, Write};
 use std::process;
-use std::fs::OpenOptions;
 use std::time::Duration;
+
+#[cfg(debug_assertions)]
+use std::fs::OpenOptions;
 
 mod ui;
 
-/// Safe logging macro that writes to a log file
+use ui::AuthMode;
+
+/// Debug logging macro - only writes to log file in debug builds
+#[cfg(debug_assertions)]
 macro_rules! log_debug {
     ($($arg:tt)*) => {{
         if let Ok(mut file) = OpenOptions::new()
@@ -22,6 +27,12 @@ macro_rules! log_debug {
             let _ = writeln!(file, $($arg)*);
         }
     }};
+}
+
+/// No-op in release builds
+#[cfg(not(debug_assertions))]
+macro_rules! log_debug {
+    ($($arg:tt)*) => {{}};
 }
 
 // NetworkManager secret flags
@@ -165,7 +176,7 @@ fn wait_for_quit() {
     
     // Wait for the thread with a timeout
     match rx.recv_timeout(Duration::from_secs(30)) {
-        Ok(msg) => log_debug!("[auth-dialog] Received: {}", msg),
+        Ok(_msg) => log_debug!("[auth-dialog] Received: {}", _msg),
         Err(_) => log_debug!("[auth-dialog] Timeout waiting for QUIT"),
     }
 }
@@ -365,13 +376,13 @@ fn main() -> Result<()> {
     log_debug!("[auth-dialog] ========================================");
     log_debug!("[auth-dialog] Called with args: {:?}", args);
     
-    let mut uuid = String::new();
+    let mut _uuid = String::new();
     let mut name = String::new();
     let mut _service_name = String::new();
     let mut reprompt = false;
     let mut hints: Vec<String> = Vec::new();
     let mut external_ui_mode = false;
-    let mut allow_interaction = false;
+    let mut _allow_interaction = false;
     let mut vpn_message: Option<String> = None;
 
     // Parse arguments manually since NM uses various formats
@@ -379,7 +390,7 @@ fn main() -> Result<()> {
     while i < args.len() {
         match args[i].as_str() {
             "-u" | "--uuid" if i + 1 < args.len() => {
-                uuid = args[i + 1].clone();
+                _uuid = args[i + 1].clone();
                 i += 2;
             }
             "-n" | "--name" if i + 1 < args.len() => {
@@ -395,7 +406,7 @@ fn main() -> Result<()> {
                 i += 1;
             }
             "-i" | "--allow-interaction" => {
-                allow_interaction = true;
+                _allow_interaction = true;
                 i += 1;
             }
             "-t" | "--hint" if i + 1 < args.len() => {
@@ -511,10 +522,10 @@ fn main() -> Result<()> {
 
     // Standard mode - show GUI if needed
     
-    // If password was explicitly requested, show full UI
+    // If password was explicitly requested, show password-only UI
     if password_requested {
-        log_debug!("[auth-dialog] Password requested - showing full UI");
-        return run_ui(name, Some(username), None, false, keychain_disabled);
+        log_debug!("[auth-dialog] Password requested - showing password-only UI");
+        return run_ui(name, Some(username), None, AuthMode::PasswordOnly, keychain_disabled);
     }
     
     // If MFA only mode, we need to show just the OTP field
@@ -527,7 +538,7 @@ fn main() -> Result<()> {
                 name,
                 Some(username),
                 Some(pwd.clone()),
-                true,  // mfa_only
+                AuthMode::MfaOnly,
                 keychain_disabled,
             );
         } else {
@@ -548,14 +559,14 @@ fn main() -> Result<()> {
     log_debug!("[auth-dialog] Showing full UI");
 
     // Show full UI
-    run_ui(name, Some(username), password, false, keychain_disabled)
+    run_ui(name, Some(username), password, AuthMode::Full, keychain_disabled)
 }
 
 fn run_ui(
     name: String,
     prefilled_username: Option<String>,
     prefilled_password: Option<String>,
-    mfa_only: bool,
+    mode: AuthMode,
     keychain_disabled: bool,
 ) -> Result<()> {
     let app = Application::builder()
@@ -571,7 +582,7 @@ fn run_ui(
             &name_clone,
             prefilled_username.clone(),
             prefilled_password_clone.clone(),
-            mfa_only,
+            mode,
         );
 
         // Handle Cancel
@@ -588,12 +599,12 @@ fn run_ui(
         let mfa_entry = dialog.mfa_entry.clone();
         let window = dialog.window.clone();
         let keychain_disabled = keychain_disabled;
-        let mfa_only = mfa_only;
+        let mode = mode;
         let prefilled_password = prefilled_password_clone.clone();
 
         dialog.connect_button.connect_clicked(move |_| {
             let username = username_entry.text().to_string();
-            let password = if mfa_only {
+            let password = if mode == AuthMode::MfaOnly {
                 // In MFA-only mode, use prefilled password
                 prefilled_password.clone().unwrap_or_default()
             } else {
@@ -607,7 +618,7 @@ fn run_ui(
                       username, !password.is_empty(), !mfa_token.is_empty());
 
             // Save password to keychain if user entered it (not MFA-only mode)
-            if !mfa_only && !keychain_disabled && !username.is_empty() && !password.is_empty() {
+            if mode != AuthMode::MfaOnly && !keychain_disabled && !username.is_empty() && !password.is_empty() {
                 // Check if password was manually entered (different from prefilled)
                 let should_save = prefilled_password.as_ref().map_or(true, |p| p != &password);
                 if should_save {

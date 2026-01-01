@@ -40,6 +40,8 @@ struct PendingAuth {
     connector: Box<dyn TunnelConnector + Send>,
     session: Arc<VpnSession>,
     params: TunnelParams,
+    /// What secret we're waiting for: "password" or "mfa_token"
+    pending_hint: String,
 }
 
 /// The D-Bus interface - only contains Arc<Mutex<InternalState>>
@@ -223,21 +225,7 @@ impl VpnPlugin {
         let new_params = params_from_connection(&connection)
             .map_err(|e| fdo::Error::Failed(format!("Invalid secrets: {}", e)))?;
 
-        let Some(mfa_code) = &new_params.mfa_code else {
-            error!("NewSecrets called but no MFA code provided");
-            return Err(fdo::Error::Failed("No MFA code in new secrets".into()));
-        };
-
-        info!("Submitting new MFA code");
-
-        // Submit the new MFA code
-        let new_session = pending.connector
-            .challenge_code(pending.session.clone(), mfa_code)
-            .await
-            .map_err(|e| {
-                error!("MFA challenge failed: {}", e);
-                fdo::Error::Failed(format!("MFA failed: {}", e))
-            })?;
+        info!("Pending hint: {}", pending.pending_hint);
 
         // Get D-Bus connection for signals
         let conn = {
@@ -246,44 +234,78 @@ impl VpnPlugin {
         };
         let conn = conn.ok_or_else(|| fdo::Error::Failed("D-Bus connection lost".into()))?;
 
-        let iface_ref = conn
-            .object_server()
-            .interface::<_, VpnPlugin>("/org/freedesktop/NetworkManager/VPN/Plugin")
-            .await
-            .map_err(|e| fdo::Error::Failed(format!("Interface error: {}", e)))?;
-        let ctx = iface_ref.signal_emitter();
+        // Check what we're waiting for
+        if pending.pending_hint == "password" {
+            // User provided a new password - restart authentication from scratch
+            info!("Restarting authentication with new password");
+            
+            // Update params with new password
+            let mut updated_params = pending.params.clone();
+            updated_params.password = new_params.password.clone();
+            
+            // Drop old connector and session, create new connection
+            drop(pending);
+            
+            // Re-run do_connect with updated connection data
+            self.do_connect(connection, true).await
+        } else {
+            // MFA token - submit the code to the existing session
+            let Some(mfa_code) = &new_params.mfa_code else {
+                error!("NewSecrets called but no MFA code provided");
+                return Err(fdo::Error::Failed("No MFA code in new secrets".into()));
+            };
 
-        // Check result - extract prompt before moving session
-        let challenge_prompt = match &new_session.state {
-            SessionState::PendingChallenge(c) => Some(c.prompt.clone()),
-            _ => None,
-        };
+            info!("Submitting new MFA code");
 
-        match new_session.state.clone() {
-            SessionState::Authenticated(_) | SessionState::NoState => {
-                info!("Authenticated after NewSecrets!");
-                self.complete_connection(pending.connector, new_session, conn, pending.params).await
-            }
-            SessionState::PendingChallenge(_) => {
-                let prompt = challenge_prompt.unwrap();
-                info!("Still need secrets: {}", prompt);
+            // Submit the new MFA code
+            let new_session = pending.connector
+                .challenge_code(pending.session.clone(), mfa_code)
+                .await
+                .map_err(|e| {
+                    error!("MFA challenge failed: {}", e);
+                    fdo::Error::Failed(format!("MFA failed: {}", e))
+                })?;
 
-                // Store pending auth again
-                {
-                    let mut inner = self.inner.lock().await;
-                    inner.pending_auth = Some(PendingAuth {
-                        connector: pending.connector,
-                        session: new_session,
-                        params: pending.params,
-                    });
+            let iface_ref = conn
+                .object_server()
+                .interface::<_, VpnPlugin>("/org/freedesktop/NetworkManager/VPN/Plugin")
+                .await
+                .map_err(|e| fdo::Error::Failed(format!("Interface error: {}", e)))?;
+            let ctx = iface_ref.signal_emitter();
+
+            // Check result - extract prompt before moving session
+            let challenge_prompt = match &new_session.state {
+                SessionState::PendingChallenge(c) => Some(c.prompt.clone()),
+                _ => None,
+            };
+
+            match new_session.state.clone() {
+                SessionState::Authenticated(_) | SessionState::NoState => {
+                    info!("Authenticated after NewSecrets!");
+                    self.complete_connection(pending.connector, new_session, conn, pending.params).await
                 }
+                SessionState::PendingChallenge(_) => {
+                    let prompt = challenge_prompt.unwrap();
+                    info!("Still need secrets: {}", prompt);
 
-                // Emit signal again
-                VpnPlugin::secrets_required(ctx, &prompt, vec!["mfa_token"])
-                    .await
-                    .map_err(|e| fdo::Error::Failed(format!("Signal error: {}", e)))?;
+                    // Store pending auth again (always MFA at this point)
+                    {
+                        let mut inner = self.inner.lock().await;
+                        inner.pending_auth = Some(PendingAuth {
+                            connector: pending.connector,
+                            session: new_session,
+                            params: pending.params,
+                            pending_hint: "mfa_token".to_string(),
+                        });
+                    }
 
-                Ok(())
+                    // Emit signal again
+                    VpnPlugin::secrets_required(ctx, &prompt, vec!["mfa_token"])
+                        .await
+                        .map_err(|e| fdo::Error::Failed(format!("Signal error: {}", e)))?;
+
+                    Ok(())
+                }
             }
         }
     }
@@ -507,6 +529,9 @@ impl VpnPlugin {
         prompt: &str,
         hints: Vec<&str>,
     ) -> fdo::Result<()> {
+        // Get the primary hint (first one)
+        let pending_hint = hints.first().copied().unwrap_or("mfa_token").to_string();
+        
         // Store pending auth
         {
             let mut inner = self.inner.lock().await;
@@ -514,6 +539,7 @@ impl VpnPlugin {
                 connector,
                 session,
                 params,
+                pending_hint,
             });
         }
 
