@@ -37,19 +37,39 @@ echo "Installing binaries from $SRC_DIR to /usr/libexec/..."
 install -m 755 "$SRC_DIR/nm-snx-service" /usr/libexec/
 install -m 755 "$SRC_DIR/nm-snx-auth-dialog" /usr/libexec/
 
-# 2. Install NetworkManager VPN plugin definition
+# 2. Install editor plugin library
+EDITOR_LIB=""
+if [ -f "./apps/nm-snx-editor/builddir/libnm-vpn-plugin-snx.so" ]; then
+    EDITOR_LIB="./apps/nm-snx-editor/builddir/libnm-vpn-plugin-snx.so"
+elif [ -f "./libnm-vpn-plugin-snx.so" ]; then
+    EDITOR_LIB="./libnm-vpn-plugin-snx.so"
+fi
+
+if [ -n "$EDITOR_LIB" ]; then
+    echo "Installing editor plugin library..."
+    # Determine NetworkManager lib directory
+    NM_LIBDIR="/usr/lib64/NetworkManager"
+    if [ ! -d "$NM_LIBDIR" ]; then
+        NM_LIBDIR="/usr/lib/NetworkManager"
+    fi
+    install -m 755 "$EDITOR_LIB" "$NM_LIBDIR/"
+else
+    echo "Warning: libnm-vpn-plugin-snx.so not found, skipping editor plugin installation"
+fi
+
+# 3. Install NetworkManager VPN plugin definition
 echo "Installing VPN plugin definition..."
 install -m 644 ./package/nm/snx.name /usr/lib/NetworkManager/VPN/
 
-# 3. Install DBus service file
+# 4. Install DBus service file
 echo "Installing DBus service file..."
 install -m 644 ./package/nm/org.freedesktop.NetworkManager.snx.service /usr/share/dbus-1/system-services/
 
-# 4. Install DBus security configuration
+# 5. Install DBus security configuration
 echo "Installing DBus security configuration..."
 install -m 644 ./package/nm/nm-snx.conf /etc/dbus-1/system.d/
 
-# 5. Reload NetworkManager to pick up changes
+# 6. Reload NetworkManager to pick up changes
 echo "Reloading NetworkManager..."
 systemctl reload NetworkManager
 

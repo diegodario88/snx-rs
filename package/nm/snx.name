@@ -6,7 +6,9 @@ supports-multiple-connections=false
 supports-hints=yes
 
 [libnm]
-# plugin=libnm-vpn-plugin-snx.so
+plugin=libnm-vpn-plugin-snx.so
 
 [GNOME]
 auth-dialog=/usr/libexec/nm-snx-auth-dialog
+supports-external-ui-mode=false
+supports-hints=true
