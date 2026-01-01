@@ -1,0 +1,43 @@
+Name:           NetworkManager-snx
+Version:        {{version}}
+Release:        1%{?dist}
+Summary:        NetworkManager VPN plugin for Check Point SNX
+
+License:        AGPL-3.0-or-later
+URL:            https://github.com/ancwrd1/snx-rs
+BuildArch:      x86_64
+
+Requires:       NetworkManager >= 1.2
+Requires:       gtk4 >= 4.0
+Requires:       libadwaita >= 1.0
+Requires:       libsecret >= 0.20
+
+# Source is a tarball created by package script
+Source0:        files.tar
+
+%description
+NetworkManager VPN plugin for Check Point SNX VPN, based on snx-rs.
+Provides integration with GNOME Settings for configuring and connecting
+to Check Point VPN servers.
+
+%prep
+
+%build
+
+%install
+mkdir -p %{buildroot}
+tar -xf %{SOURCE0} -C %{buildroot}
+
+%files
+%{_libexecdir}/nm-snx-service
+%{_libexecdir}/nm-snx-auth-dialog
+%{_libdir}/NetworkManager/libnm-vpn-plugin-snx.so
+%{_prefix}/lib/NetworkManager/VPN/snx.name
+%{_datadir}/dbus-1/system-services/org.freedesktop.NetworkManager.snx.service
+%config %{_sysconfdir}/dbus-1/system.d/nm-snx.conf
+
+%post
+systemctl reload NetworkManager 2>/dev/null || true
+
+%postun
+systemctl reload NetworkManager 2>/dev/null || true
