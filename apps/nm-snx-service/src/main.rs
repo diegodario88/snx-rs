@@ -1,13 +1,13 @@
 use crate::config::params_from_connection;
 use snxcore::model::params::TunnelParams;
 use snxcore::model::{SessionState, VpnSession};
-use snxcore::platform::{set_no_device_config, Keychain, Platform, PlatformAccess};
-use snxcore::tunnel::{new_tunnel_connector, TunnelCommand, TunnelConnector, TunnelEvent};
+use snxcore::platform::{Keychain, Platform, PlatformAccess, set_no_device_config};
+use snxcore::tunnel::{TunnelCommand, TunnelConnector, TunnelEvent, new_tunnel_connector};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, ToSocketAddrs};
 use std::sync::Arc;
-use tokio::signal::unix::{signal, SignalKind};
-use tokio::sync::{mpsc, Mutex};
+use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, warn};
 use zbus::object_server::SignalEmitter;
 use zbus::zvariant::Value;
@@ -72,30 +72,17 @@ impl VpnPlugin {
     async fn vpn_state_changed(ctx: &SignalEmitter<'_>, state: u32) -> zbus::Result<()>;
 
     #[zbus(signal, name = "SecretsRequired")]
-    async fn secrets_required(
-        ctx: &SignalEmitter<'_>,
-        message: &str,
-        secrets: Vec<&str>,
-    ) -> zbus::Result<()>;
+    async fn secrets_required(ctx: &SignalEmitter<'_>, message: &str, secrets: Vec<&str>) -> zbus::Result<()>;
 
     /// Config signal - generic VPN configuration
     #[zbus(signal, name = "Config")]
-    async fn config_signal(
-        ctx: &SignalEmitter<'_>,
-        config: HashMap<&str, Value<'_>>,
-    ) -> zbus::Result<()>;
+    async fn config_signal(ctx: &SignalEmitter<'_>, config: HashMap<&str, Value<'_>>) -> zbus::Result<()>;
 
     /// Ip4Config signal - IPv4 configuration
     #[zbus(signal, name = "Ip4Config")]
-    async fn ip4_config_signal(
-        ctx: &SignalEmitter<'_>,
-        config: HashMap<&str, Value<'_>>,
-    ) -> zbus::Result<()>;
+    async fn ip4_config_signal(ctx: &SignalEmitter<'_>, config: HashMap<&str, Value<'_>>) -> zbus::Result<()>;
 
-    async fn connect(
-        &self,
-        connection: HashMap<String, HashMap<String, zvariant::OwnedValue>>,
-    ) -> fdo::Result<()> {
+    async fn connect(&self, connection: HashMap<String, HashMap<String, zvariant::OwnedValue>>) -> fdo::Result<()> {
         info!("Connect request received");
         self.do_connect(connection, false).await
     }
@@ -111,12 +98,12 @@ impl VpnPlugin {
 
     async fn disconnect(&self) -> fdo::Result<()> {
         info!("Disconnect request received via D-Bus");
-        
+
         // Log a backtrace-like info to see who's calling
         debug!("Disconnect called - dumping state");
 
         let mut inner = self.inner.lock().await;
-        
+
         // Clear pending auth
         if inner.pending_auth.is_some() {
             info!("Clearing pending authentication");
@@ -130,7 +117,7 @@ impl VpnPlugin {
         } else {
             warn!("Disconnect called but no active VPN session");
         }
-        
+
         Ok(())
     }
 
@@ -169,11 +156,7 @@ impl VpnPlugin {
         // Try to get password from keychain (if no-keychain=false)
         if !params.no_keychain {
             debug!("NeedSecrets: checking keychain for user '{}'", params.user_name);
-            if let Ok(_) = Platform::get()
-                .new_keychain()
-                .acquire_password(&params.user_name)
-                .await
-            {
+            if Platform::get().new_keychain().acquire_password(&params.user_name).await.is_ok() {
                 info!("NeedSecrets: password found in keychain");
                 return Ok("".to_string());
             }
@@ -181,21 +164,18 @@ impl VpnPlugin {
         }
 
         // Check if mfa_token is already provided (for subsequent auth steps)
-        if let Some(vpn) = settings.get("vpn") {
-            if let Some(secrets) = vpn.get("secrets") {
-                if let Ok(dict) = secrets.downcast_ref::<zvariant::Dict<'_, '_>>() {
-                    for (k, v) in dict.iter() {
-                        if let Ok(key) = k.downcast_ref::<zvariant::Str>() {
-                            if key.as_str() == "mfa_token" || key.as_str() == "mfa-token" {
-                                if let Ok(val) = v.downcast_ref::<zvariant::Str>() {
-                                    if !val.as_str().is_empty() {
-                                        info!("NeedSecrets: mfa_token found");
-                                        return Ok("".to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
+        if let Some(vpn) = settings.get("vpn")
+            && let Some(secrets) = vpn.get("secrets")
+            && let Ok(dict) = secrets.downcast_ref::<zvariant::Dict<'_, '_>>()
+        {
+            for (k, v) in dict.iter() {
+                if let Ok(key) = k.downcast_ref::<zvariant::Str>()
+                    && (key.as_str() == "mfa_token" || key.as_str() == "mfa-token")
+                    && let Ok(val) = v.downcast_ref::<zvariant::Str>()
+                    && !val.as_str().is_empty()
+                {
+                    info!("NeedSecrets: mfa_token found");
+                    return Ok("".to_string());
                 }
             }
         }
@@ -204,10 +184,7 @@ impl VpnPlugin {
         Ok("vpn".to_string())
     }
 
-    async fn new_secrets(
-        &self,
-        connection: HashMap<String, HashMap<String, zvariant::OwnedValue>>,
-    ) -> fdo::Result<()> {
+    async fn new_secrets(&self, connection: HashMap<String, HashMap<String, zvariant::OwnedValue>>) -> fdo::Result<()> {
         info!("NewSecrets request received");
 
         // Take pending auth
@@ -222,8 +199,8 @@ impl VpnPlugin {
         };
 
         // Parse new secrets
-        let new_params = params_from_connection(&connection)
-            .map_err(|e| fdo::Error::Failed(format!("Invalid secrets: {}", e)))?;
+        let new_params =
+            params_from_connection(&connection).map_err(|e| fdo::Error::Failed(format!("Invalid secrets: {}", e)))?;
 
         info!("Pending hint: {}", pending.pending_hint);
 
@@ -238,14 +215,14 @@ impl VpnPlugin {
         if pending.pending_hint == "password" {
             // User provided a new password - restart authentication from scratch
             info!("Restarting authentication with new password");
-            
+
             // Update params with new password
             let mut updated_params = pending.params.clone();
             updated_params.password = new_params.password.clone();
-            
+
             // Drop old connector and session, create new connection
             drop(pending);
-            
+
             // Re-run do_connect with updated connection data
             self.do_connect(connection, true).await
         } else {
@@ -258,7 +235,8 @@ impl VpnPlugin {
             info!("Submitting new MFA code");
 
             // Submit the new MFA code
-            let new_session = pending.connector
+            let new_session = pending
+                .connector
                 .challenge_code(pending.session.clone(), mfa_code)
                 .await
                 .map_err(|e| {
@@ -282,7 +260,8 @@ impl VpnPlugin {
             match new_session.state.clone() {
                 SessionState::Authenticated(_) | SessionState::NoState => {
                     info!("Authenticated after NewSecrets!");
-                    self.complete_connection(pending.connector, new_session, conn, pending.params).await
+                    self.complete_connection(pending.connector, new_session, conn, pending.params)
+                        .await
                 }
                 SessionState::PendingChallenge(_) => {
                     let prompt = challenge_prompt.unwrap();
@@ -333,17 +312,16 @@ impl VpnPlugin {
         }
 
         // Parse config
-        let mut params = params_from_connection(&connection)
-            .map_err(|e| fdo::Error::Failed(format!("Config error: {}", e)))?;
+        let mut params =
+            params_from_connection(&connection).map_err(|e| fdo::Error::Failed(format!("Config error: {}", e)))?;
 
         // Fetch password from keychain if not provided and no-keychain=false
         if params.password.is_empty() && !params.no_keychain && !params.user_name.is_empty() {
-            debug!("Attempting to fetch password from keychain for user '{}'", params.user_name);
-            match Platform::get()
-                .new_keychain()
-                .acquire_password(&params.user_name)
-                .await
-            {
+            debug!(
+                "Attempting to fetch password from keychain for user '{}'",
+                params.user_name
+            );
+            match Platform::get().new_keychain().acquire_password(&params.user_name).await {
                 Ok(password) => {
                     info!("Password retrieved from keychain");
                     params.password = password;
@@ -354,8 +332,12 @@ impl VpnPlugin {
             }
         }
 
-        debug!("Parsed params: server={}, user={}, password_len={}", 
-               params.server_name, params.user_name, params.password.len());
+        debug!(
+            "Parsed params: server={}, user={}, password_len={}",
+            params.server_name,
+            params.user_name,
+            params.password.len()
+        );
 
         // Get signal emitter
         let iface_ref = conn
@@ -430,20 +412,24 @@ impl VpnPlugin {
                             }
                             Err(e) => {
                                 let err_msg = e.to_string();
-                                if err_msg.contains("Authentication failed") || err_msg.contains("authentication failed") {
+                                if err_msg.contains("Authentication failed")
+                                    || err_msg.contains("authentication failed")
+                                {
                                     warn!("Password authentication failed for user '{}'", params.user_name);
-                                    
+
                                     if interactive {
                                         // Request new password via UI
                                         info!("Requesting new password via reprompt");
-                                        return self.request_secrets_with_hints(
-                                            connector, 
-                                            session, 
-                                            params, 
-                                            ctx, 
-                                            "Password incorrect. Please enter your password:",
-                                            vec!["password"]
-                                        ).await;
+                                        return self
+                                            .request_secrets_with_hints(
+                                                connector,
+                                                session,
+                                                params,
+                                                ctx,
+                                                "Password incorrect. Please enter your password:",
+                                                vec!["password"],
+                                            )
+                                            .await;
                                     }
                                 }
                                 return Err(fdo::Error::Failed(format!("Password error: {}", e)));
@@ -453,21 +439,28 @@ impl VpnPlugin {
                         // No password provided - request it
                         if interactive {
                             info!("No password provided, requesting via UI");
-                            return self.request_secrets_with_hints(
-                                connector, 
-                                session, 
-                                params, 
-                                ctx, 
-                                "Please enter your password:",
-                                vec!["password"]
-                            ).await;
+                            return self
+                                .request_secrets_with_hints(
+                                    connector,
+                                    session,
+                                    params,
+                                    ctx,
+                                    "Please enter your password:",
+                                    vec!["password"],
+                                )
+                                .await;
                         } else {
                             return Err(fdo::Error::Failed("Password required".into()));
                         }
                     } else if let Some(mfa) = &params.mfa_code {
                         // Only use MFA code if it's not empty AND we're allowed to use it
                         // (use_mfa_from_params is false for initial connection, true after NewSecrets)
-                        debug!("MFA code in params: '{}' (len={}, use_from_params={})", mfa, mfa.len(), use_mfa_from_params);
+                        debug!(
+                            "MFA code in params: '{}' (len={}, use_from_params={})",
+                            mfa,
+                            mfa.len(),
+                            use_mfa_from_params
+                        );
                         if !mfa.is_empty() && !mfa_code_used && use_mfa_from_params {
                             info!("Submitting MFA code");
                             mfa_code_used = true;
@@ -517,7 +510,8 @@ impl VpnPlugin {
         ctx: &SignalEmitter<'_>,
         prompt: &str,
     ) -> fdo::Result<()> {
-        self.request_secrets_with_hints(connector, session, params, ctx, prompt, vec!["mfa_token"]).await
+        self.request_secrets_with_hints(connector, session, params, ctx, prompt, vec!["mfa_token"])
+            .await
     }
 
     async fn request_secrets_with_hints(
@@ -531,7 +525,7 @@ impl VpnPlugin {
     ) -> fdo::Result<()> {
         // Get the primary hint (first one)
         let pending_hint = hints.first().copied().unwrap_or("mfa_token").to_string();
-        
+
         // Store pending auth
         {
             let mut inner = self.inner.lock().await;
@@ -568,22 +562,24 @@ impl VpnPlugin {
             } else {
                 format!("{}:443", server_name)
             };
-            
+
             addr_str
                 .to_socket_addrs()
                 .ok()
-                .and_then(|mut addrs| addrs.find_map(|a| match a.ip() {
-                    std::net::IpAddr::V4(v4) => Some(v4),
-                    _ => None,
-                }))
+                .and_then(|mut addrs| {
+                    addrs.find_map(|a| match a.ip() {
+                        std::net::IpAddr::V4(v4) => Some(v4),
+                        _ => None,
+                    })
+                })
                 .unwrap_or_else(|| {
                     warn!("Could not resolve gateway address from {}, using 0.0.0.0", server_name);
                     Ipv4Addr::UNSPECIFIED
                 })
         };
-        
+
         info!("Resolved VPN gateway: {} -> {}", server_name, gateway_addr);
-        
+
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let (evt_tx, mut evt_rx) = mpsc::channel(32);
 
@@ -619,47 +615,56 @@ impl VpnPlugin {
                 match event {
                     TunnelEvent::Connected(info) => {
                         info!("Tunnel connected! IP: {}", info.ip_address);
-                        
+
                         // Get IP address - NM expects host byte order (little-endian on x86)
                         let addr_bytes = info.ip_address.addr().octets();
                         let addr_u32 = u32::from_ne_bytes(addr_bytes);
                         let prefix: u32 = info.ip_address.prefix_len() as u32;
-                        
+
                         // External gateway in host byte order
                         let gateway_u32 = u32::from_ne_bytes(gateway_addr.octets());
-                        
-                        debug!("IP address: {} -> host order: 0x{:08x}, prefix: {}", 
-                               info.ip_address.addr(), addr_u32, prefix);
-                        debug!("External gateway: {} -> host order: 0x{:08x}", 
-                               gateway_addr, gateway_u32);
-                        
+
+                        debug!(
+                            "IP address: {} -> host order: 0x{:08x}, prefix: {}",
+                            info.ip_address.addr(),
+                            addr_u32,
+                            prefix
+                        );
+                        debug!(
+                            "External gateway: {} -> host order: 0x{:08x}",
+                            gateway_addr, gateway_u32
+                        );
+
                         // Build Config signal data
                         let mut config: HashMap<&str, Value<'_>> = HashMap::new();
                         config.insert("tundev", Value::new(info.interface_name.as_str()));
                         config.insert("gateway", Value::new(gateway_u32));
                         config.insert("has-ip4", Value::new(true));
                         config.insert("has-ip6", Value::new(false));
-                        
-                        info!("Sending Config signal: tundev={}, gateway={} (0x{:08x})", 
-                              info.interface_name, gateway_addr, gateway_u32);
-                        
+
+                        info!(
+                            "Sending Config signal: tundev={}, gateway={} (0x{:08x})",
+                            info.interface_name, gateway_addr, gateway_u32
+                        );
+
                         // Emit Config signal
                         if let Err(e) = VpnPlugin::config_signal(ctx, config).await {
                             error!("Failed to emit Config signal: {}", e);
                         }
-                        
+
                         // Build Ip4Config signal data
                         let mut ip4_config: HashMap<&str, Value<'_>> = HashMap::new();
-                        
+
                         // Address in host byte order
                         ip4_config.insert("address", Value::new(addr_u32));
                         ip4_config.insert("prefix", Value::new(prefix));
-                        
+
                         // Tell NM not to add default route - snxcore handles routing
                         ip4_config.insert("never-default", Value::new(true));
-                        
+
                         // DNS servers as array of u32 in host byte order
-                        let dns_servers: Vec<u32> = info.dns_servers
+                        let dns_servers: Vec<u32> = info
+                            .dns_servers
                             .iter()
                             .map(|ip| u32::from_ne_bytes(ip.octets()))
                             .collect();
@@ -667,22 +672,24 @@ impl VpnPlugin {
                             debug!("DNS servers: {:?}", info.dns_servers);
                             ip4_config.insert("dns", Value::Array(dns_servers.into()));
                         }
-                        
+
                         // DNS domains (use "domains" not "dns-search")
                         if !info.search_domains.is_empty() {
                             debug!("DNS domains: {:?}", info.search_domains);
                             let domains: Vec<&str> = info.search_domains.iter().map(|s| s.as_str()).collect();
                             ip4_config.insert("domains", Value::Array(domains.into()));
                         }
-                        
-                        debug!("Sending Ip4Config signal: address=0x{:08x}, prefix={}", 
-                               addr_u32, prefix);
-                        
+
+                        debug!(
+                            "Sending Ip4Config signal: address=0x{:08x}, prefix={}",
+                            addr_u32, prefix
+                        );
+
                         // Emit Ip4Config signal
                         if let Err(e) = VpnPlugin::ip4_config_signal(ctx, ip4_config).await {
                             error!("Failed to emit Ip4Config signal: {}", e);
                         }
-                        
+
                         // Emit StateChanged(STARTED)
                         info!("Emitting StateChanged(STARTED)");
                         let _ = VpnPlugin::vpn_state_changed(ctx, NM_VPN_SERVICE_STATE_STARTED).await;
@@ -700,7 +707,7 @@ impl VpnPlugin {
         // Store handle (including connector to keep it alive)
         {
             let mut inner = self.inner.lock().await;
-            inner.vpn_handle = Some(VpnHandle { 
+            inner.vpn_handle = Some(VpnHandle {
                 command_sender: cmd_tx,
                 connector,
             });
@@ -737,10 +744,10 @@ async fn main() -> anyhow::Result<()> {
     let mut bus_name = "org.freedesktop.NetworkManager.snx".to_string();
 
     while let Some(arg) = args.next() {
-        if arg == "--bus-name" {
-            if let Some(name) = args.next() {
-                bus_name = name;
-            }
+        if arg == "--bus-name"
+            && let Some(name) = args.next()
+        {
+            bus_name = name;
         }
     }
 

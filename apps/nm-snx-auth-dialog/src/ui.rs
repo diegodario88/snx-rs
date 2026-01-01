@@ -1,7 +1,10 @@
 use gtk4::prelude::*;
+use gtk4::{Align, InputPurpose, Orientation};
 use libadwaita::prelude::*;
-use gtk4::{Align, Orientation, InputPurpose};
-use libadwaita::{Application, ApplicationWindow, HeaderBar, PreferencesGroup, PreferencesPage, EntryRow, PasswordEntryRow, ToolbarView};
+use libadwaita::{
+    Application, ApplicationWindow, EntryRow, HeaderBar, PasswordEntryRow, PreferencesGroup, PreferencesPage,
+    ToolbarView,
+};
 use std::rc::Rc;
 
 /// UI display mode
@@ -70,7 +73,7 @@ impl AuthDialog {
             .maximum_size(400)
             .tightening_threshold(300)
             .build();
-        
+
         // Main vertical box - align to start so it doesn't expand
         let vbox = gtk4::Box::new(Orientation::Vertical, 0);
         vbox.set_margin_top(12);
@@ -81,37 +84,25 @@ impl AuthDialog {
 
         // Page & Group for Form Fields
         let page = PreferencesPage::new();
-        
+
         let (group_title, group_description) = match mode {
-            AuthMode::MfaOnly => (
-                "Two-Factor Authentication",
-                "Enter the code from your authenticator."
-            ),
-            AuthMode::PasswordOnly => (
-                "Credentials",
-                "Enter your VPN password."
-            ),
-            AuthMode::Full => (
-                "Credentials",
-                "Enter your VPN credentials and OTP code."
-            ),
+            AuthMode::MfaOnly => ("Two-Factor Authentication", "Enter the code from your authenticator."),
+            AuthMode::PasswordOnly => ("Credentials", "Enter your VPN password."),
+            AuthMode::Full => ("Credentials", "Enter your VPN credentials and OTP code."),
         };
-        
+
         let group = PreferencesGroup::builder()
             .title(group_title)
             .description(group_description)
             .build();
 
         // Username Field (EntryRow) - hidden in MFA-only mode
-        let username_entry = EntryRow::builder()
-            .title("Username")
-            .activates_default(true)
-            .build();
-        
+        let username_entry = EntryRow::builder().title("Username").activates_default(true).build();
+
         if let Some(user) = &username {
             username_entry.set_text(user);
         }
-        
+
         if mode == AuthMode::MfaOnly {
             username_entry.set_visible(false);
         }
@@ -123,13 +114,13 @@ impl AuthDialog {
             .build();
 
         let mut password_filled = false;
-        if let Some(pass) = &password {
-            if !pass.is_empty() {
-                password_entry.set_text(pass);
-                password_filled = true;
-            }
+        if let Some(pass) = &password
+            && !pass.is_empty()
+        {
+            password_entry.set_text(pass);
+            password_filled = true;
         }
-        
+
         if mode == AuthMode::MfaOnly {
             password_entry.set_visible(false);
         } else if password_filled {
@@ -146,7 +137,7 @@ impl AuthDialog {
 
         // Configure max length for OTP (6 digits + 1 separator = 7)
         mfa_entry.set_max_length(7);
-        
+
         // Hide MFA field in PasswordOnly mode
         if mode == AuthMode::PasswordOnly {
             mfa_entry.set_visible(false);
@@ -155,20 +146,20 @@ impl AuthDialog {
         // Auto-format OTP as user types (e.g., 123456 -> 123-456)
         mfa_entry.connect_changed(|entry| {
             let text = entry.text().to_string();
-            
+
             // Extract only digits
             let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
-            
+
             // Limit to 6 digits
             let digits: String = digits.chars().take(6).collect();
-            
+
             // Format with separator after 3 digits
             let formatted = if digits.len() > 3 {
                 format!("{}-{}", &digits[..3], &digits[3..])
             } else {
                 digits
             };
-            
+
             // Avoid infinite loop - only update if different
             if text != formatted {
                 entry.set_text(&formatted);
@@ -190,7 +181,7 @@ impl AuthDialog {
 
         let cancel_button = gtk4::Button::with_label("Cancel");
         cancel_button.set_width_request(100);
-        
+
         let connect_button = gtk4::Button::with_label("Connect");
         connect_button.add_css_class("suggested-action");
         connect_button.add_css_class("pill");
@@ -230,7 +221,7 @@ impl AuthDialog {
 
         clamp.set_child(Some(&vbox));
         content.set_content(Some(&clamp));
-        
+
         window.set_content(Some(&content));
 
         Rc::new(Self {

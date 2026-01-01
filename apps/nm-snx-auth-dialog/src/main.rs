@@ -54,84 +54,80 @@ struct VpnData {
 ///   SECRET_VAL=value
 ///   (empty line)
 ///   DONE
-/// 
+///
 /// Both DATA and SECRET pairs come before a single DONE.
 /// Uses a background thread with timeout to avoid blocking forever.
 fn read_vpn_details_from_stdin() -> VpnData {
     use std::sync::mpsc;
     use std::thread;
-    
+
     let (tx, rx) = mpsc::channel();
-    
+
     // Spawn a thread to read stdin
     thread::spawn(move || {
         let mut result = VpnData::default();
         let stdin = io::stdin();
         let mut lines = stdin.lock().lines();
-        
+
         let mut current_data_key: Option<String> = None;
         let mut current_secret_key: Option<String> = None;
-        
-        loop {
-            match lines.next() {
-                Some(Ok(line)) => {
-                    // Skip empty lines
-                    if line.is_empty() {
-                        continue;
+
+        while let Some(Ok(line)) = lines.next() {
+            // Skip empty lines
+            if line.is_empty() {
+                continue;
+            }
+
+            // DONE or QUIT signals end of input
+            if line == "DONE" || line == "QUIT" {
+                break;
+            }
+
+            if let Some((prefix, value)) = line.split_once('=') {
+                match prefix {
+                    "DATA_KEY" => {
+                        current_data_key = Some(value.to_string());
                     }
-                    
-                    // DONE or QUIT signals end of input
-                    if line == "DONE" || line == "QUIT" {
-                        break;
-                    }
-                    
-                    if let Some((prefix, value)) = line.split_once('=') {
-                        match prefix {
-                            "DATA_KEY" => {
-                                current_data_key = Some(value.to_string());
-                            }
-                            "DATA_VAL" => {
-                                if let Some(ref key) = current_data_key {
-                                    result.data.insert(key.clone(), value.to_string());
-                                }
-                                current_data_key = None;
-                            }
-                            "SECRET_KEY" => {
-                                current_secret_key = Some(value.to_string());
-                            }
-                            "SECRET_VAL" => {
-                                if let Some(ref key) = current_secret_key {
-                                    result.secrets.insert(key.clone(), value.to_string());
-                                }
-                                current_secret_key = None;
-                            }
-                            _ => {}
+                    "DATA_VAL" => {
+                        if let Some(ref key) = current_data_key {
+                            result.data.insert(key.clone(), value.to_string());
                         }
+                        current_data_key = None;
                     }
+                    "SECRET_KEY" => {
+                        current_secret_key = Some(value.to_string());
+                    }
+                    "SECRET_VAL" => {
+                        if let Some(ref key) = current_secret_key {
+                            result.secrets.insert(key.clone(), value.to_string());
+                        }
+                        current_secret_key = None;
+                    }
+                    _ => {}
                 }
-                Some(Err(_)) | None => break,
             }
         }
-        
+
         let _ = tx.send(result);
     });
-    
+
     log_debug!("[auth-dialog] Reading VPN details from stdin (with 5s timeout)...");
-    
+
     // Wait with timeout
-    let result = match rx.recv_timeout(Duration::from_secs(5)) {
+    match rx.recv_timeout(Duration::from_secs(5)) {
         Ok(data) => {
             log_debug!("[auth-dialog] VPN data: {:?}", data.data);
-            log_debug!("[auth-dialog] VPN secrets keys: {:?}", data.secrets.keys().collect::<Vec<_>>());
+            log_debug!(
+                "[auth-dialog] VPN secrets keys: {:?}",
+                data.secrets.keys().collect::<Vec<_>>()
+            );
             data
         }
         Err(_) => {
             log_debug!("[auth-dialog] Timeout reading stdin, proceeding with empty data");
             VpnData::default()
         }
-    };
-    
-    result
+    }
 }
 
 /// Wait for "QUIT" command from stdin (used in standard mode)
@@ -140,11 +136,11 @@ fn read_vpn_details_from_stdin() -> VpnData {
 fn wait_for_quit() {
     use std::sync::mpsc;
     use std::thread;
-    
+
     log_debug!("[auth-dialog] Waiting for QUIT from stdin...");
-    
+
     let (tx, rx) = mpsc::channel();
-    
+
     // Spawn a thread to read from stdin
     thread::spawn(move || {
         let mut buffer = String::new();
@@ -173,7 +169,7 @@ fn wait_for_quit() {
             }
         }
     });
-    
+
     // Wait for the thread with a timeout
     match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(_msg) => log_debug!("[auth-dialog] Received: {}", _msg),
@@ -190,15 +186,19 @@ fn output_external_ui_mode(
     need_mfa: bool,
     _mfa_token: &str,
 ) {
-    log_debug!("[auth-dialog] Outputting external-ui-mode format (need_password={}, need_mfa={})", need_password, need_mfa);
-    
+    log_debug!(
+        "[auth-dialog] Outputting external-ui-mode format (need_password={}, need_mfa={})",
+        need_password,
+        need_mfa
+    );
+
     // GKeyFile format as used by OpenVPN
     println!("[VPN Plugin UI]");
     println!("Version=2");
     println!("Description={}", prompt);
     println!("Title=VPN Authentication");
     println!();
-    
+
     // Only include password field if needed
     if need_password {
         println!("[password]");
@@ -208,7 +208,7 @@ fn output_external_ui_mode(
         println!("ShouldAsk=true");
         println!();
     }
-    
+
     // Only include MFA field if needed
     if need_mfa {
         println!("[mfa_token]");
@@ -218,7 +218,7 @@ fn output_external_ui_mode(
         println!("ShouldAsk=true");
         println!();
     }
-    
+
     // If nothing is needed, output a "no secrets required" marker
     if !need_password && !need_mfa {
         println!("[nosecret]");
@@ -228,7 +228,7 @@ fn output_external_ui_mode(
         println!("ShouldAsk=false");
         println!();
     }
-    
+
     // Flush stdout
     let _ = io::stdout().flush();
 }
@@ -236,25 +236,25 @@ fn output_external_ui_mode(
 /// Output secrets in standard mode format
 fn output_standard_mode(username: &str, password: &str, mfa_token: Option<&str>) {
     log_debug!("[auth-dialog] Outputting standard mode format");
-    
+
     println!("username");
     println!("{}", username);
     println!("password");
     println!("{}", password);
-    
-    if let Some(token) = mfa_token {
-        if !token.is_empty() {
-            println!("mfa_token");
-            println!("{}", token);
-            println!("mfa_token-flags");
-            println!("{}", NM_SETTING_SECRET_FLAG_NOT_SAVED);
-        }
+
+    if let Some(token) = mfa_token
+        && !token.is_empty()
+    {
+        println!("mfa_token");
+        println!("{}", token);
+        println!("mfa_token-flags");
+        println!("{}", NM_SETTING_SECRET_FLAG_NOT_SAVED);
     }
-    
+
     // Empty lines to signal end of secrets
     println!();
     println!();
-    
+
     // Flush stdout
     let _ = io::stdout().flush();
 }
@@ -265,13 +265,16 @@ async fn get_password_from_keychain(username: &str) -> Result<String> {
 
     let ss = SecretService::connect(EncryptionType::Dh).await?;
     let collection = ss.get_default_collection().await?;
-    
+
     if let Ok(true) = collection.is_locked().await {
         let _ = collection.unlock().await;
     }
 
     let search_items = ss.search_items(props).await?;
-    let item = search_items.unlocked.first().ok_or_else(|| anyhow::anyhow!("No password in keychain"))?;
+    let item = search_items
+        .unlocked
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("No password in keychain"))?;
     let secret = item.get_secret().await?;
 
     Ok(String::from_utf8_lossy(&secret).into_owned())
@@ -332,10 +335,10 @@ fn read_password_from_config() -> Option<String> {
             if key == "password" && !value.is_empty() {
                 // Try to decode base64
                 use base64::Engine;
-                if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(value) {
-                    if let Ok(string) = String::from_utf8(decoded) {
-                        return Some(string);
-                    }
+                if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(value)
+                    && let Ok(string) = String::from_utf8(decoded)
+                {
+                    return Some(string);
                 }
                 // If not base64, use raw value
                 return Some(value.to_string());
@@ -369,20 +372,20 @@ fn is_keychain_disabled() -> bool {
     false // Default: keychain is enabled
 }
 
+#[allow(unused_variables, unused_assignments)]
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
-    
+
     // Log all arguments for debugging
     log_debug!("[auth-dialog] ========================================");
     log_debug!("[auth-dialog] Called with args: {:?}", args);
-    
-    let mut _uuid = String::new();
+
+    let mut uuid = String::new();
     let mut name = String::new();
-    let mut _service_name = String::new();
     let mut reprompt = false;
     let mut hints: Vec<String> = Vec::new();
     let mut external_ui_mode = false;
-    let mut _allow_interaction = false;
+    let mut allow_interaction = false;
     let mut vpn_message: Option<String> = None;
 
     // Parse arguments manually since NM uses various formats
@@ -390,7 +393,7 @@ fn main() -> Result<()> {
     while i < args.len() {
         match args[i].as_str() {
             "-u" | "--uuid" if i + 1 < args.len() => {
-                _uuid = args[i + 1].clone();
+                uuid = args[i + 1].clone();
                 i += 2;
             }
             "-n" | "--name" if i + 1 < args.len() => {
@@ -398,7 +401,7 @@ fn main() -> Result<()> {
                 i += 2;
             }
             "-s" | "--service" if i + 1 < args.len() => {
-                _service_name = args[i + 1].clone();
+                // service_name is provided by NM but we don't use it
                 i += 2;
             }
             "-r" | "--reprompt" => {
@@ -406,7 +409,7 @@ fn main() -> Result<()> {
                 i += 1;
             }
             "-i" | "--allow-interaction" => {
-                _allow_interaction = true;
+                allow_interaction = true;
                 i += 1;
             }
             "-t" | "--hint" if i + 1 < args.len() => {
@@ -435,18 +438,33 @@ fn main() -> Result<()> {
         }
     }
 
-    log_debug!("[auth-dialog] Parsed: uuid={}, name={}, reprompt={}, hints={:?}, external_ui_mode={}, allow_interaction={}, vpn_message={:?}", 
-               uuid, name, reprompt, hints, external_ui_mode, allow_interaction, vpn_message);
+    log_debug!(
+        "[auth-dialog] Parsed: uuid={}, name={}, reprompt={}, hints={:?}, external_ui_mode={}, allow_interaction={}, vpn_message={:?}",
+        uuid,
+        name,
+        reprompt,
+        hints,
+        external_ui_mode,
+        allow_interaction,
+        vpn_message
+    );
 
     // Read VPN data from stdin (NetworkManager sends this)
     let vpn_details = read_vpn_details_from_stdin();
-    
+
     // Get username/password from stdin data, or fall back to config
-    let stdin_username = vpn_details.secrets.get("username").cloned()
+    let stdin_username = vpn_details
+        .secrets
+        .get("username")
+        .cloned()
         .or_else(|| vpn_details.data.get("username").cloned());
     let stdin_password = vpn_details.secrets.get("password").cloned();
-    
-    log_debug!("[auth-dialog] stdin_username={:?}, stdin_password={}", stdin_username, stdin_password.is_some());
+
+    log_debug!(
+        "[auth-dialog] stdin_username={:?}, stdin_password={}",
+        stdin_username,
+        stdin_password.is_some()
+    );
 
     // Check if we're being asked specifically for MFA token or password
     let mfa_only = hints.iter().any(|h| h == "mfa_token");
@@ -457,16 +475,20 @@ fn main() -> Result<()> {
     let config_password = read_password_from_config();
     let keychain_disabled = is_keychain_disabled();
 
-    log_debug!("[auth-dialog] config_username={:?}, config_password={}, keychain_disabled={}", 
-              config_username, config_password.is_some(), keychain_disabled);
+    log_debug!(
+        "[auth-dialog] config_username={:?}, config_password={}, keychain_disabled={}",
+        config_username,
+        config_password.is_some(),
+        keychain_disabled
+    );
 
     // Determine which username to use (stdin > config)
     let username = stdin_username.or(config_username.clone()).unwrap_or_default();
-    
+
     // For password, prefer keychain (most up-to-date) > stdin > config
     // BUT if password was explicitly requested (hint), don't use cached passwords
     let mut password: Option<String> = None;
-    
+
     if password_requested {
         log_debug!("[auth-dialog] Password explicitly requested, ignoring cached passwords");
         // Don't use any cached password - force user to enter it
@@ -479,7 +501,7 @@ fn main() -> Result<()> {
                 log_debug!("[auth-dialog] Got password from keychain (preferred)");
             }
         }
-        
+
         // Fall back to stdin password if no keychain
         if password.is_none() {
             password = stdin_password;
@@ -487,7 +509,7 @@ fn main() -> Result<()> {
                 log_debug!("[auth-dialog] Using password from stdin");
             }
         }
-        
+
         // Fall back to config password
         if password.is_none() {
             password = config_password.clone();
@@ -497,41 +519,41 @@ fn main() -> Result<()> {
         }
     }
 
-    let prompt = vpn_message.clone().unwrap_or_else(|| {
-        format!("Authentication required for VPN '{}'", name)
-    });
+    let prompt = vpn_message
+        .clone()
+        .unwrap_or_else(|| format!("Authentication required for VPN '{}'", name));
 
     // In external-ui-mode, we don't show a GUI - we output what fields are needed
     if external_ui_mode {
         log_debug!("[auth-dialog] External UI mode - outputting field requirements");
-        
+
         let need_password = password.is_none() || reprompt;
         let need_mfa = mfa_only;
-        
+
         output_external_ui_mode(
             &name,
             &prompt,
             need_password,
             password.as_deref().unwrap_or(""),
             need_mfa,
-            "",  // No MFA token yet
+            "", // No MFA token yet
         );
-        
+
         return Ok(());
     }
 
     // Standard mode - show GUI if needed
-    
+
     // If password was explicitly requested, show password-only UI
     if password_requested {
         log_debug!("[auth-dialog] Password requested - showing password-only UI");
         return run_ui(name, Some(username), None, AuthMode::PasswordOnly, keychain_disabled);
     }
-    
+
     // If MFA only mode, we need to show just the OTP field
     if mfa_only {
         log_debug!("[auth-dialog] MFA-only mode - showing OTP UI");
-        
+
         if let Some(ref pwd) = password {
             // Show OTP-only UI
             return run_ui(
@@ -547,13 +569,13 @@ fn main() -> Result<()> {
     }
 
     // Not reprompt and we have credentials: try to use them without UI
-    if !reprompt && !username.is_empty() {
-        if let Some(ref pwd) = password {
-            log_debug!("[auth-dialog] Have credentials, outputting without UI");
-            output_standard_mode(&username, pwd, None);
-            wait_for_quit();
-            return Ok(());
-        }
+    if !reprompt && !username.is_empty()
+        && let Some(ref pwd) = password
+    {
+        log_debug!("[auth-dialog] Have credentials, outputting without UI");
+        output_standard_mode(&username, pwd, None);
+        wait_for_quit();
+        return Ok(());
     }
 
     log_debug!("[auth-dialog] Showing full UI");
@@ -612,15 +634,19 @@ fn run_ui(
             };
             let mfa_token = mfa_entry.text().to_string();
             // Remove separators (dash/space) before sending to server
-            let mfa_token = mfa_token.replace('-', "").replace(' ', "");
+            let mfa_token = mfa_token.replace(['-', ' '], "");
 
-            log_debug!("[auth-dialog] User submitted: username={}, password={}, mfa={}", 
-                      username, !password.is_empty(), !mfa_token.is_empty());
+            log_debug!(
+                "[auth-dialog] User submitted: username={}, password={}, mfa={}",
+                username,
+                !password.is_empty(),
+                !mfa_token.is_empty()
+            );
 
             // Save password to keychain if user entered it (not MFA-only mode)
             if mode != AuthMode::MfaOnly && !keychain_disabled && !username.is_empty() && !password.is_empty() {
                 // Check if password was manually entered (different from prefilled)
-                let should_save = prefilled_password.as_ref().map_or(true, |p| p != &password);
+                let should_save = prefilled_password.as_ref() != Some(&password);
                 if should_save {
                     let username_clone = username.clone();
                     let password_clone = password.clone();
@@ -635,14 +661,18 @@ fn run_ui(
             }
 
             // Output secrets in standard mode format
-            let mfa_opt = if mfa_token.is_empty() { None } else { Some(mfa_token.as_str()) };
+            let mfa_opt = if mfa_token.is_empty() {
+                None
+            } else {
+                Some(mfa_token.as_str())
+            };
             output_standard_mode(&username, &password, mfa_opt);
 
             window.close();
-            
+
             // Wait for QUIT from NetworkManager before exiting
             wait_for_quit();
-            
+
             process::exit(0);
         });
 
