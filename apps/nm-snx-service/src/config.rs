@@ -3,12 +3,10 @@ use snxcore::model::params::TunnelParams;
 use snxcore::util::parse_ipv4_or_subnet;
 use std::collections::HashMap;
 use std::time::Duration;
-use zbus::zvariant::{Dict, OwnedValue, Str};
 use tracing::warn;
+use zbus::zvariant::{Dict, OwnedValue, Str};
 
-pub fn params_from_connection(
-    connection: &HashMap<String, HashMap<String, OwnedValue>>,
-) -> Result<TunnelParams> {
+pub fn params_from_connection(connection: &HashMap<String, HashMap<String, OwnedValue>>) -> Result<TunnelParams> {
     let mut params = TunnelParams::default();
 
     if let Some(vpn_settings) = connection.get("vpn") {
@@ -21,22 +19,22 @@ pub fn params_from_connection(
         }
 
         // Also check for top-level keys in the 'vpn' map (e.g. user-name)
-        if let Some(username) = vpn_settings.get("user-name") {
-            if let Ok(s) = username.downcast_ref::<Str>() {
-                params.user_name = s.as_str().to_string();
-            }
+        if let Some(username) = vpn_settings.get("user-name")
+            && let Ok(s) = username.downcast_ref::<Str>()
+        {
+            params.user_name = s.as_str().to_string();
         }
-        if let Some(username) = vpn_settings.get("username") {
-            if let Ok(s) = username.downcast_ref::<Str>() {
-                params.user_name = s.as_str().to_string();
-            }
+        if let Some(username) = vpn_settings.get("username")
+            && let Ok(s) = username.downcast_ref::<Str>()
+        {
+            params.user_name = s.as_str().to_string();
         }
     }
 
     // For NetworkManager plugin, snxcore handles all networking
     // We'll emit signals but NM won't manage the interface
-    params.no_routing = false;  // snxcore manages routing
-    params.no_dns = false;      // snxcore manages DNS
+    params.no_routing = false; // snxcore manages routing
+    params.no_dns = false; // snxcore manages DNS
 
     Ok(params)
 }
@@ -72,37 +70,21 @@ fn apply_string_map(map: &HashMap<String, String>, params: &mut TunnelParams) ->
             "password-factor" => params.password_factor = v.parse().unwrap_or(1),
             "mfa_token" | "mfa-token" => params.mfa_code = Some(v.clone()),
             "log-level" => params.log_level = v.clone(),
-            "search-domains" => {
-                params.search_domains = v.split(',').map(|s| s.trim().to_owned()).collect()
-            }
+            "search-domains" => params.search_domains = v.split(',').map(|s| s.trim().to_owned()).collect(),
             "ignore-search-domains" => {
                 params.ignore_search_domains = v.split(',').map(|s| s.trim().to_owned()).collect()
             }
-            "dns-servers" => {
-                params.dns_servers = v
-                    .split(',')
-                    .flat_map(|s| s.trim().parse().ok())
-                    .collect()
-            }
+            "dns-servers" => params.dns_servers = v.split(',').flat_map(|s| s.trim().parse().ok()).collect(),
             "ignore-dns-servers" => {
-                params.ignore_dns_servers = v
-                    .split(',')
-                    .flat_map(|s| s.trim().parse().ok())
-                    .collect()
+                params.ignore_dns_servers = v.split(',').flat_map(|s| s.trim().parse().ok()).collect()
             }
             "default-route" => params.default_route = v.parse().unwrap_or_default(),
             "no-routing" => params.no_routing = v.parse().unwrap_or_default(),
             "add-routes" => {
-                params.add_routes = v
-                    .split(',')
-                    .flat_map(|s| parse_ipv4_or_subnet(s.trim()).ok())
-                    .collect()
+                params.add_routes = v.split(',').flat_map(|s| parse_ipv4_or_subnet(s.trim()).ok()).collect()
             }
             "ignore-routes" => {
-                params.ignore_routes = v
-                    .split(',')
-                    .flat_map(|s| parse_ipv4_or_subnet(s.trim()).ok())
-                    .collect()
+                params.ignore_routes = v.split(',').flat_map(|s| parse_ipv4_or_subnet(s.trim()).ok()).collect()
             }
             "no-dns" => params.no_dns = v.parse().unwrap_or_default(),
             "ignore-server-cert" => params.ignore_server_cert = v.parse().unwrap_or_default(),
@@ -126,9 +108,7 @@ fn apply_string_map(map: &HashMap<String, String>, params: &mut TunnelParams) ->
             "client-mode" => params.client_mode = v.clone(),
             "set-routing-domains" => params.set_routing_domains = v.parse().unwrap_or_default(),
             "port-knock" => params.port_knock = v.parse().unwrap_or_default(),
-            "ip-lease-time" => {
-                params.ip_lease_time = v.parse::<u64>().ok().map(Duration::from_secs)
-            }
+            "ip-lease-time" => params.ip_lease_time = v.parse::<u64>().ok().map(Duration::from_secs),
             "disable-ipv6" => params.disable_ipv6 = v.parse().unwrap_or_default(),
             "mtu" => params.mtu = v.parse().unwrap_or(1350),
             "transport-type" => params.transport_type = v.parse().unwrap_or_default(),

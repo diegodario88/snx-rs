@@ -135,7 +135,11 @@ impl NetworkInterface for LinuxNetworkInterface {
     async fn configure_device(&self, device_name: &str) -> anyhow::Result<()> {
         // Skip setting device as unmanaged when running as NM VPN plugin
         let skip = NO_DEVICE_CONFIG.load(Ordering::SeqCst);
-        tracing::info!("configure_device: device={}, skip_nmcli_managed_no={}", device_name, skip);
+        tracing::info!(
+            "configure_device: device={}, skip_nmcli_managed_no={}",
+            device_name,
+            skip
+        );
         if !skip {
             tracing::info!("Running: nmcli device set {} managed no", device_name);
             util::run_command("nmcli", ["device", "set", device_name, "managed", "no"]).await?;
