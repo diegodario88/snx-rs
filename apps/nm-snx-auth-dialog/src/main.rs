@@ -29,12 +29,6 @@ macro_rules! log_debug {
     }};
 }
 
-/// No-op in release builds
-#[cfg(not(debug_assertions))]
-macro_rules! log_debug {
-    ($($arg:tt)*) => {{}};
-}
-
 // NetworkManager secret flags
 const NM_SETTING_SECRET_FLAG_NOT_SAVED: u32 = 0x1;
 
@@ -596,17 +590,8 @@ fn run_ui(
         .application_id("org.freedesktop.NetworkManager.snx.AuthDialog")
         .build();
 
-    let name_clone = name.clone();
-    let prefilled_password_clone = prefilled_password.clone();
-
     app.connect_activate(move |app| {
-        let dialog = ui::AuthDialog::new(
-            app,
-            &name_clone,
-            prefilled_username.clone(),
-            prefilled_password_clone.clone(),
-            mode,
-        );
+        let dialog = ui::AuthDialog::new(app, &name, prefilled_username.clone(), prefilled_password.clone(), mode);
 
         // Handle Cancel
         let window_clone = dialog.window.clone();
@@ -623,13 +608,13 @@ fn run_ui(
         let window = dialog.window.clone();
         let keychain_disabled = keychain_disabled;
         let mode = mode;
-        let prefilled_password = prefilled_password_clone.clone();
+        let prefilled_password_clone = prefilled_password.clone();
 
         dialog.connect_button.connect_clicked(move |_| {
             let username = username_entry.text().to_string();
             let password = if mode == AuthMode::MfaOnly {
                 // In MFA-only mode, use prefilled password
-                prefilled_password.clone().unwrap_or_default()
+                prefilled_password_clone.clone().unwrap_or_default()
             } else {
                 password_entry.text().to_string()
             };
@@ -647,7 +632,7 @@ fn run_ui(
             // Save password to keychain if user entered it (not MFA-only mode)
             if mode != AuthMode::MfaOnly && !keychain_disabled && !username.is_empty() && !password.is_empty() {
                 // Check if password was manually entered (different from prefilled)
-                let should_save = prefilled_password.as_ref() != Some(&password);
+                let should_save = prefilled_password_clone.as_ref() != Some(&password);
                 if should_save {
                     let username_clone = username.clone();
                     let password_clone = password.clone();
