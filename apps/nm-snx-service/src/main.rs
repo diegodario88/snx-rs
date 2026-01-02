@@ -156,7 +156,12 @@ impl VpnPlugin {
         // Try to get password from keychain (if no-keychain=false)
         if !params.no_keychain {
             debug!("NeedSecrets: checking keychain for user '{}'", params.user_name);
-            if Platform::get().new_keychain().acquire_password(&params.user_name).await.is_ok() {
+            if Platform::get()
+                .new_keychain()
+                .acquire_password(&params.user_name)
+                .await
+                .is_ok()
+            {
                 info!("NeedSecrets: password found in keychain");
                 return Ok("".to_string());
             }

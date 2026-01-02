@@ -569,7 +569,8 @@ fn main() -> Result<()> {
     }
 
     // Not reprompt and we have credentials: try to use them without UI
-    if !reprompt && !username.is_empty()
+    if !reprompt
+        && !username.is_empty()
         && let Some(ref pwd) = password
     {
         log_debug!("[auth-dialog] Have credentials, outputting without UI");
