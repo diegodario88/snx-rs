@@ -667,6 +667,10 @@ impl VpnPlugin {
                         // Tell NM not to add default route - snxcore handles routing
                         ip4_config.insert("never-default", Value::new(true));
 
+                        // DNS priority - negative value means VPN DNS is preferred for matching domains (split DNS)
+                        // This ensures VPN DNS servers are used for the specified search domains
+                        ip4_config.insert("dns-priority", Value::new(-100i32));
+
                         // DNS servers as array of u32 in host byte order
                         let dns_servers: Vec<u32> = info
                             .dns_servers
@@ -678,11 +682,28 @@ impl VpnPlugin {
                             ip4_config.insert("dns", Value::Array(dns_servers.into()));
                         }
 
-                        // DNS domains (use "domains" not "dns-search")
-                        if !info.search_domains.is_empty() {
-                            debug!("DNS domains: {:?}", info.search_domains);
-                            let domains: Vec<&str> = info.search_domains.iter().map(|s| s.as_str()).collect();
-                            ip4_config.insert("domains", Value::Array(domains.into()));
+                        // DNS domains - ensure all have ~ prefix for split DNS (routing domains)
+                        // This tells NetworkManager/systemd-resolved to only use VPN DNS for these domains
+                        // Note: domains must be declared outside the if block so references remain valid
+                        // until ip4_config_signal is called
+                        // We filter out "~." which is a wildcard that would route ALL DNS through VPN
+                        let domains: Vec<String> = info
+                            .search_domains
+                            .iter()
+                            .map(|s| {
+                                let trimmed = s.trim();
+                                if trimmed.starts_with('~') {
+                                    trimmed.to_string()
+                                } else {
+                                    format!("~{}", trimmed)
+                                }
+                            })
+                            .filter(|s| s != "~." && s != "~")
+                            .collect();
+                        if !domains.is_empty() {
+                            debug!("DNS domains (with ~ prefix for split DNS): {:?}", domains);
+                            let domain_refs: Vec<&str> = domains.iter().map(|s| s.as_str()).collect();
+                            ip4_config.insert("domains", Value::Array(domain_refs.into()));
                         }
 
                         debug!(

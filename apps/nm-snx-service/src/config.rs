@@ -31,10 +31,12 @@ pub fn params_from_connection(connection: &HashMap<String, HashMap<String, Owned
         }
     }
 
-    // For NetworkManager plugin, snxcore handles all networking
-    // We'll emit signals but NM won't manage the interface
+    // For NetworkManager plugin:
+    // - snxcore handles routing (NM doesn't know about VPN-specific routes)
+    // - NetworkManager handles DNS via Ip4Config signals (cleaner integration)
     params.no_routing = false; // snxcore manages routing
-    params.no_dns = false; // snxcore manages DNS
+    params.no_dns = true; // NetworkManager manages DNS via Ip4Config signal
+    params.set_routing_domains = true; // Enable split DNS with ~ prefix for routing domains
 
     Ok(params)
 }
