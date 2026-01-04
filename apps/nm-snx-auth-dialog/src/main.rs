@@ -29,6 +29,12 @@ macro_rules! log_debug {
     }};
 }
 
+/// No-op in release builds
+#[cfg(not(debug_assertions))]
+macro_rules! log_debug {
+    ($($arg:tt)*) => {{}};
+}
+
 // NetworkManager secret flags
 const NM_SETTING_SECRET_FLAG_NOT_SAVED: u32 = 0x1;
 
