@@ -81,13 +81,16 @@ pub trait ResolverConfigurator {
 
 #[async_trait]
 pub trait Keychain {
-    async fn acquire_password(&self, username: &str) -> anyhow::Result<String>;
-    async fn store_password(&self, username: &str, password: &str) -> anyhow::Result<()>;
+    /// Acquire password from keychain for a specific server and username
+    async fn acquire_password(&self, server: &str, username: &str) -> anyhow::Result<String>;
+    /// Store password in keychain for a specific server and username
+    async fn store_password(&self, server: &str, username: &str, password: &str) -> anyhow::Result<()>;
 }
 
 #[async_trait]
 pub trait RoutingConfigurator {
     async fn add_routes(&self, routes: &[Ipv4Net], ignore_routes: &[Ipv4Net]) -> anyhow::Result<()>;
+    async fn remove_routes(&self) -> anyhow::Result<()>;
     async fn setup_default_route(&self, destination: Ipv4Addr, disable_ipv6: bool) -> anyhow::Result<()>;
     async fn setup_keepalive_route(&self, destination: Ipv4Addr, with_table: bool) -> anyhow::Result<()>;
     async fn remove_default_route(&self, destination: Ipv4Addr, enable_ipv6: bool) -> anyhow::Result<()>;

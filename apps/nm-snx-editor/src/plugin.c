@@ -377,9 +377,28 @@ snx_editor_class_init(SnxEditorClass *klass)
     object_class->dispose = snx_editor_dispose;
 }
 
+/* Callback to emit "changed" signal when any widget is modified */
+static void
+on_widget_changed(GtkWidget *widget, gpointer user_data)
+{
+    (void)widget;
+    SnxEditor *editor = SNX_EDITOR(user_data);
+    g_signal_emit_by_name(editor, "changed");
+}
+
+/* Callback for switch notify::active */
+static void
+on_switch_changed(GObject *gobject, GParamSpec *pspec, gpointer user_data)
+{
+    (void)gobject;
+    (void)pspec;
+    SnxEditor *editor = SNX_EDITOR(user_data);
+    g_signal_emit_by_name(editor, "changed");
+}
+
 /* Helper: add a labeled entry row */
 static GtkWidget *
-create_entry_row(GtkWidget *list, const char *label_text, const char *value, GtkWidget **out_entry)
+create_entry_row(GtkWidget *list, const char *label_text, const char *value, GtkWidget **out_entry, SnxEditor *editor)
 {
     GtkWidget *row = gtk_list_box_row_new();
     gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), FALSE);
@@ -394,6 +413,10 @@ create_entry_row(GtkWidget *list, const char *label_text, const char *value, Gtk
     gtk_widget_set_hexpand(entry, TRUE);
     if (value && *value)
         gtk_editable_set_text(GTK_EDITABLE(entry), value);
+    
+    /* Connect changed signal */
+    if (editor)
+        g_signal_connect(entry, "changed", G_CALLBACK(on_widget_changed), editor);
     
     gtk_box_append(GTK_BOX(box), label);
     gtk_box_append(GTK_BOX(box), entry);
@@ -412,7 +435,7 @@ create_entry_row(GtkWidget *list, const char *label_text, const char *value, Gtk
 
 /* Helper: add a labeled switch row */
 static GtkWidget *
-create_switch_row(GtkWidget *list, const char *label_text, gboolean value, GtkWidget **out_switch)
+create_switch_row(GtkWidget *list, const char *label_text, gboolean value, GtkWidget **out_switch, SnxEditor *editor)
 {
     GtkWidget *row = gtk_list_box_row_new();
     gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), FALSE);
@@ -425,6 +448,10 @@ create_switch_row(GtkWidget *list, const char *label_text, gboolean value, GtkWi
     
     gtk_switch_set_active(GTK_SWITCH(switch_widget), value);
     gtk_widget_set_valign(switch_widget, GTK_ALIGN_CENTER);
+    
+    /* Connect notify::active signal for switches */
+    if (editor)
+        g_signal_connect(switch_widget, "notify::active", G_CALLBACK(on_switch_changed), editor);
     
     gtk_box_append(GTK_BOX(box), label);
     gtk_box_append(GTK_BOX(box), switch_widget);
@@ -445,7 +472,7 @@ create_switch_row(GtkWidget *list, const char *label_text, gboolean value, GtkWi
 static GtkWidget *
 create_combo_row(GtkWidget *list, const char *label_text, const char *value,
                  const char **options, const char **option_ids, int n_options,
-                 gboolean has_entry, GtkWidget **out_combo)
+                 gboolean has_entry, GtkWidget **out_combo, SnxEditor *editor)
 {
     GtkWidget *row = gtk_list_box_row_new();
     gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), FALSE);
@@ -483,6 +510,17 @@ create_combo_row(GtkWidget *list, const char *label_text, const char *value,
         gtk_combo_box_set_active(GTK_COMBO_BOX(combo), 0);
     }
     
+    /* Connect changed signal */
+    if (editor) {
+        g_signal_connect(combo, "changed", G_CALLBACK(on_widget_changed), editor);
+        /* Also connect to the entry inside if it has one */
+        if (has_entry) {
+            GtkWidget *entry = gtk_combo_box_get_child(GTK_COMBO_BOX(combo));
+            if (entry)
+                g_signal_connect(entry, "changed", G_CALLBACK(on_widget_changed), editor);
+        }
+    }
+    
     gtk_box_append(GTK_BOX(box), label);
     gtk_box_append(GTK_BOX(box), combo);
     
@@ -500,7 +538,7 @@ create_combo_row(GtkWidget *list, const char *label_text, const char *value,
 
 /* Helper: add a labeled spin button row */
 static GtkWidget *
-create_spin_row(GtkWidget *list, const char *label_text, int value, int min, int max, GtkWidget **out_spin)
+create_spin_row(GtkWidget *list, const char *label_text, int value, int min, int max, GtkWidget **out_spin, SnxEditor *editor)
 {
     GtkWidget *row = gtk_list_box_row_new();
     gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), FALSE);
@@ -509,10 +547,16 @@ create_spin_row(GtkWidget *list, const char *label_text, int value, int min, int
     GtkWidget *spin = gtk_spin_button_new_with_range(min, max, 1);
     
     gtk_widget_set_halign(label, GTK_ALIGN_START);
-    gtk_widget_set_hexpand(label, TRUE);
+    gtk_widget_set_hexpand(label, FALSE);
+    gtk_widget_set_size_request(label, 180, -1);
     
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(spin), value);
     gtk_widget_set_valign(spin, GTK_ALIGN_CENTER);
+    gtk_widget_set_hexpand(spin, TRUE);
+    
+    /* Connect value-changed signal */
+    if (editor)
+        g_signal_connect(spin, "value-changed", G_CALLBACK(on_widget_changed), editor);
     
     gtk_box_append(GTK_BOX(box), label);
     gtk_box_append(GTK_BOX(box), spin);
@@ -662,12 +706,12 @@ build_editor_widget(SnxEditor *editor, NMConnection *connection)
     
     /* === Server section === */
     CREATE_SECTION("Server", server_list);
-    create_entry_row(server_list, "Gateway", server, &editor->server_entry);
+    create_entry_row(server_list, "Gateway", server, &editor->server_entry, editor);
     gtk_box_append(GTK_BOX(box), server_list);
     
     /* === Authentication section === */
     CREATE_SECTION("Authentication", auth_list);
-    create_entry_row(auth_list, "Username", username, &editor->username_entry);
+    create_entry_row(auth_list, "Username", username, &editor->username_entry, editor);
     
     /* Login type - combo with entry for custom values */
     static const char *login_type_options[] = {
@@ -683,16 +727,16 @@ build_editor_widget(SnxEditor *editor, NMConnection *connection)
         "ma"
     };
     create_combo_row(auth_list, "Login Type", login_type,
-                     login_type_options, login_type_ids, 4, TRUE, &editor->login_type_combo);
+                     login_type_options, login_type_ids, 4, TRUE, &editor->login_type_combo, editor);
     
     /* Cert type dropdown */
     static const char *cert_type_options[] = { "None", "PKCS#12", "PKCS#8", "PKCS#11" };
     static const char *cert_type_ids[] = { "none", "pkcs12", "pkcs8", "pkcs11" };
     create_combo_row(auth_list, "Certificate Type", cert_type,
-                     cert_type_options, cert_type_ids, 4, FALSE, &editor->cert_type_combo);
+                     cert_type_options, cert_type_ids, 4, FALSE, &editor->cert_type_combo, editor);
     
-    create_entry_row(auth_list, "Certificate Path", cert_path, &editor->cert_path_entry);
-    create_entry_row(auth_list, "Certificate ID (PKCS#11)", cert_id, &editor->cert_id_entry);
+    create_entry_row(auth_list, "Certificate Path", cert_path, &editor->cert_path_entry, editor);
+    create_entry_row(auth_list, "Certificate ID (PKCS#11)", cert_id, &editor->cert_id_entry, editor);
     gtk_box_append(GTK_BOX(box), auth_list);
     
     /* === Tunnel section === */
@@ -702,49 +746,49 @@ build_editor_widget(SnxEditor *editor, NMConnection *connection)
     static const char *tunnel_type_options[] = { "IPSec", "SSL" };
     static const char *tunnel_type_ids[] = { "ipsec", "ssl" };
     create_combo_row(tunnel_list, "Tunnel Type", tunnel_type,
-                     tunnel_type_options, tunnel_type_ids, 2, FALSE, &editor->tunnel_type_combo);
+                     tunnel_type_options, tunnel_type_ids, 2, FALSE, &editor->tunnel_type_combo, editor);
     
     /* Transport type dropdown */
     static const char *transport_type_options[] = { "Auto-detect", "Kernel", "UDP", "TCP Transport" };
     static const char *transport_type_ids[] = { "auto", "kernel", "udp", "tcpt" };
     create_combo_row(tunnel_list, "Transport Type", transport_type,
-                     transport_type_options, transport_type_ids, 4, FALSE, &editor->transport_type_combo);
+                     transport_type_options, transport_type_ids, 4, FALSE, &editor->transport_type_combo, editor);
     
-    create_spin_row(tunnel_list, "MTU", mtu, 576, 9000, &editor->mtu_spin);
-    create_switch_row(tunnel_list, "Persist IKE Session", ike_persist, &editor->ike_persist_switch);
-    create_switch_row(tunnel_list, "Disable Keepalive", no_keepalive, &editor->no_keepalive_switch);
+    create_spin_row(tunnel_list, "MTU", mtu, 576, 9000, &editor->mtu_spin, editor);
+    create_switch_row(tunnel_list, "Persist IKE Session", ike_persist, &editor->ike_persist_switch, editor);
+    create_switch_row(tunnel_list, "Disable Keepalive", no_keepalive, &editor->no_keepalive_switch, editor);
     gtk_box_append(GTK_BOX(box), tunnel_list);
     
     /* === Routing section === */
     CREATE_SECTION("Routing", route_list);
-    create_switch_row(route_list, "Use as default route", default_route, &editor->default_route_switch);
-    create_switch_row(route_list, "Disable all routing", no_routing, &editor->no_routing_switch);
-    create_entry_row(route_list, "Additional routes", add_routes, &editor->add_routes_entry);
-    create_entry_row(route_list, "Ignore routes", ignore_routes, &editor->ignore_routes_entry);
+    create_switch_row(route_list, "Use as default route", default_route, &editor->default_route_switch, editor);
+    create_switch_row(route_list, "Disable all routing", no_routing, &editor->no_routing_switch, editor);
+    create_entry_row(route_list, "Additional routes", add_routes, &editor->add_routes_entry, editor);
+    create_entry_row(route_list, "Ignore routes", ignore_routes, &editor->ignore_routes_entry, editor);
     gtk_box_append(GTK_BOX(box), route_list);
     
     /* === DNS section === */
     CREATE_SECTION("DNS", dns_list);
-    create_switch_row(dns_list, "Do not configure DNS", no_dns, &editor->no_dns_switch);
-    create_entry_row(dns_list, "DNS Servers", dns_servers, &editor->dns_servers_entry);
-    create_entry_row(dns_list, "Search domains", search_domains, &editor->search_domains_entry);
-    create_entry_row(dns_list, "Ignore search domains", ignore_search_domains, &editor->ignore_search_domains_entry);
-    create_entry_row(dns_list, "Ignore DNS servers", ignore_dns_servers, &editor->ignore_dns_servers_entry);
+    create_switch_row(dns_list, "Do not configure DNS", no_dns, &editor->no_dns_switch, editor);
+    create_entry_row(dns_list, "DNS Servers", dns_servers, &editor->dns_servers_entry, editor);
+    create_entry_row(dns_list, "Search domains", search_domains, &editor->search_domains_entry, editor);
+    create_entry_row(dns_list, "Ignore search domains", ignore_search_domains, &editor->ignore_search_domains_entry, editor);
+    create_entry_row(dns_list, "Ignore DNS servers", ignore_dns_servers, &editor->ignore_dns_servers_entry, editor);
     gtk_box_append(GTK_BOX(box), dns_list);
     
     /* === Security section === */
     CREATE_SECTION("Security", sec_list);
-    create_switch_row(sec_list, "Do not use keychain", no_keychain, &editor->no_keychain_switch);
-    create_switch_row(sec_list, "Ignore server certificate errors", ignore_server_cert, &editor->ignore_server_cert_switch);
-    create_entry_row(sec_list, "CA Certificates", ca_cert, &editor->ca_cert_entry);
+    create_switch_row(sec_list, "Do not use keychain", no_keychain, &editor->no_keychain_switch, editor);
+    create_switch_row(sec_list, "Ignore server certificate errors", ignore_server_cert, &editor->ignore_server_cert_switch, editor);
+    create_entry_row(sec_list, "CA Certificates", ca_cert, &editor->ca_cert_entry, editor);
     gtk_box_append(GTK_BOX(box), sec_list);
     
     /* === Advanced section === */
     CREATE_SECTION("Advanced", adv_list);
-    create_spin_row(adv_list, "IKE Lifetime (seconds)", ike_lifetime, 300, 86400, &editor->ike_lifetime_spin);
-    create_switch_row(adv_list, "Disable IPv6", disable_ipv6, &editor->disable_ipv6_switch);
-    create_switch_row(adv_list, "Port Knock", port_knock, &editor->port_knock_switch);
-    create_switch_row(adv_list, "Set Routing Domains", set_routing_domains, &editor->set_routing_domains_switch);
+    create_spin_row(adv_list, "IKE Lifetime (seconds)", ike_lifetime, 300, 86400, &editor->ike_lifetime_spin, editor);
+    create_switch_row(adv_list, "Disable IPv6", disable_ipv6, &editor->disable_ipv6_switch, editor);
+    create_switch_row(adv_list, "Port Knock", port_knock, &editor->port_knock_switch, editor);
+    create_switch_row(adv_list, "Set Routing Domains", set_routing_domains, &editor->set_routing_domains_switch, editor);
     gtk_box_append(GTK_BOX(box), adv_list);
     
     #undef CREATE_SECTION

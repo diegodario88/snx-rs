@@ -158,7 +158,7 @@ impl VpnPlugin {
             debug!("NeedSecrets: checking keychain for user '{}'", params.user_name);
             if Platform::get()
                 .new_keychain()
-                .acquire_password(&params.user_name)
+                .acquire_password(&params.server_name, &params.user_name)
                 .await
                 .is_ok()
             {
@@ -326,7 +326,7 @@ impl VpnPlugin {
                 "Attempting to fetch password from keychain for user '{}'",
                 params.user_name
             );
-            match Platform::get().new_keychain().acquire_password(&params.user_name).await {
+            match Platform::get().new_keychain().acquire_password(&params.server_name, &params.user_name).await {
                 Ok(password) => {
                     info!("Password retrieved from keychain");
                     params.password = password;

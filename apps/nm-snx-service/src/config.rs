@@ -3,11 +3,69 @@ use snxcore::model::params::TunnelParams;
 use snxcore::util::parse_ipv4_or_subnet;
 use std::collections::HashMap;
 use std::time::Duration;
-use tracing::warn;
+use tracing::{debug, warn};
 use zbus::zvariant::{Dict, OwnedValue, Str};
+
+/// Maximum length for Linux interface names (including null terminator)
+const IFNAMSIZ: usize = 16;
+/// Prefix for all SNX interface names
+const IF_PREFIX: &str = "snx-";
+
+/// Sanitize a connection name for use as interface name suffix
+/// - Converts to lowercase
+/// - Removes non-alphanumeric characters
+/// - Truncates to fit within IFNAMSIZ limit (15 - 4 for "snx-" = 11 chars max)
+fn sanitize_if_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric())
+        .take(IFNAMSIZ - 1 - IF_PREFIX.len()) // 15 - 4 = 11 chars max
+        .collect::<String>()
+        .to_lowercase()
+}
+
+/// Generate interface name from connection name (preferred) or UUID (fallback)
+///
+/// Examples:
+/// - "VPN Corp" → "snx-corp"
+/// - "My VPN Connection" → "snx-myvpnconnec" (truncated to 11 chars)
+/// - UUID fallback: "a1b2c3d4-..." → "snx-a1b2c3d4"
+fn generate_if_name(connection_name: Option<&str>, uuid: &str) -> String {
+    let suffix = if let Some(name) = connection_name {
+        let sanitized = sanitize_if_name(name);
+        if sanitized.is_empty() {
+            // Fallback to UUID if name sanitizes to empty string
+            sanitize_if_name(uuid)
+        } else {
+            sanitized
+        }
+    } else {
+        sanitize_if_name(uuid)
+    };
+
+    format!("{}{}", IF_PREFIX, suffix)
+}
 
 pub fn params_from_connection(connection: &HashMap<String, HashMap<String, OwnedValue>>) -> Result<TunnelParams> {
     let mut params = TunnelParams::default();
+
+    // Extract connection UUID for generating unique interface name
+    let mut connection_uuid: Option<String> = None;
+    let mut connection_id: Option<String> = None;
+
+    if let Some(conn_settings) = connection.get("connection") {
+        if let Some(uuid) = conn_settings.get("uuid")
+            && let Ok(s) = uuid.downcast_ref::<Str>()
+        {
+            connection_uuid = Some(s.as_str().to_string());
+        }
+        if let Some(id) = conn_settings.get("id")
+            && let Ok(s) = id.downcast_ref::<Str>()
+        {
+            connection_id = Some(s.as_str().to_string());
+        }
+    }
+
+    debug!("Connection UUID: {:?}, ID: {:?}", connection_uuid, connection_id);
 
     if let Some(vpn_settings) = connection.get("vpn") {
         if let Some(data) = vpn_settings.get("data") {
@@ -29,6 +87,16 @@ pub fn params_from_connection(connection: &HashMap<String, HashMap<String, Owned
         {
             params.user_name = s.as_str().to_string();
         }
+    }
+
+    // Generate unique interface name if not explicitly set
+    // Prefer connection name (e.g., "VPN Corp" → "snx-corp") over UUID
+    if params.if_name.is_none()
+        && let Some(uuid) = &connection_uuid
+    {
+        let generated_name = generate_if_name(connection_id.as_deref(), uuid);
+        debug!("Generated interface name: {}", generated_name);
+        params.if_name = Some(generated_name);
     }
 
     // For NetworkManager plugin:

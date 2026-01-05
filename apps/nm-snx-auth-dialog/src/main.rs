@@ -259,9 +259,12 @@ fn output_standard_mode(username: &str, password: &str, mfa_token: Option<&str>)
     let _ = io::stdout().flush();
 }
 
-/// Check if password exists in GNOME keychain for the given username
-async fn get_password_from_keychain(username: &str) -> Result<String> {
-    let props = HashMap::from([("snx-rs.username", username)]);
+/// Check if password exists in GNOME keychain for the given server and username
+async fn get_password_from_keychain(server: &str, username: &str) -> Result<String> {
+    let props = HashMap::from([
+        ("snx-rs.server", server),
+        ("snx-rs.username", username),
+    ]);
 
     let ss = SecretService::connect(EncryptionType::Dh).await?;
     let collection = ss.get_default_collection().await?;
@@ -281,8 +284,11 @@ async fn get_password_from_keychain(username: &str) -> Result<String> {
 }
 
 /// Store password in GNOME keychain
-async fn store_password_in_keychain(username: &str, password: &str) -> Result<()> {
-    let props = HashMap::from([("snx-rs.username", username)]);
+async fn store_password_in_keychain(server: &str, username: &str, password: &str) -> Result<()> {
+    let props = HashMap::from([
+        ("snx-rs.server", server),
+        ("snx-rs.username", username),
+    ]);
 
     let ss = SecretService::connect(EncryptionType::Dh).await?;
     let collection = ss.get_default_collection().await?;
@@ -293,7 +299,7 @@ async fn store_password_in_keychain(username: &str, password: &str) -> Result<()
 
     collection
         .create_item(
-            &format!("snx-rs - {username}"),
+            &format!("snx-rs - {username}@{server}"),
             props,
             password.as_bytes(),
             true,
@@ -452,6 +458,15 @@ fn main() -> Result<()> {
     // Read VPN data from stdin (NetworkManager sends this)
     let vpn_details = read_vpn_details_from_stdin();
 
+    // Get server name from VPN data (for keychain storage with server+username key)
+    let server_name = vpn_details
+        .data
+        .get("server-name")
+        .cloned()
+        .unwrap_or_default();
+
+    log_debug!("[auth-dialog] server_name={:?}", server_name);
+
     // Get username/password from stdin data, or fall back to config
     let stdin_username = vpn_details
         .secrets
@@ -494,9 +509,9 @@ fn main() -> Result<()> {
         // Don't use any cached password - force user to enter it
     } else {
         // Try keychain first (most reliable source)
-        if !keychain_disabled && !username.is_empty() {
+        if !keychain_disabled && !username.is_empty() && !server_name.is_empty() {
             let rt = tokio::runtime::Runtime::new()?;
-            password = rt.block_on(get_password_from_keychain(&username)).ok();
+            password = rt.block_on(get_password_from_keychain(&server_name, &username)).ok();
             if password.is_some() {
                 log_debug!("[auth-dialog] Got password from keychain (preferred)");
             }
@@ -547,7 +562,7 @@ fn main() -> Result<()> {
     // If password was explicitly requested, show password-only UI
     if password_requested {
         log_debug!("[auth-dialog] Password requested - showing password-only UI");
-        return run_ui(name, Some(username), None, AuthMode::PasswordOnly, keychain_disabled);
+        return run_ui(name, server_name, Some(username), None, AuthMode::PasswordOnly, keychain_disabled);
     }
 
     // If MFA only mode, we need to show just the OTP field
@@ -558,6 +573,7 @@ fn main() -> Result<()> {
             // Show OTP-only UI
             return run_ui(
                 name,
+                server_name,
                 Some(username),
                 Some(pwd.clone()),
                 AuthMode::MfaOnly,
@@ -582,11 +598,12 @@ fn main() -> Result<()> {
     log_debug!("[auth-dialog] Showing full UI");
 
     // Show full UI
-    run_ui(name, Some(username), password, AuthMode::Full, keychain_disabled)
+    run_ui(name, server_name, Some(username), password, AuthMode::Full, keychain_disabled)
 }
 
 fn run_ui(
     name: String,
+    server_name: String,
     prefilled_username: Option<String>,
     prefilled_password: Option<String>,
     mode: AuthMode,
@@ -615,6 +632,7 @@ fn run_ui(
         let keychain_disabled = keychain_disabled;
         let mode = mode;
         let prefilled_password_clone = prefilled_password.clone();
+        let server_name_clone = server_name.clone();
 
         dialog.connect_button.connect_clicked(move |_| {
             let username = username_entry.text().to_string();
@@ -636,16 +654,17 @@ fn run_ui(
             );
 
             // Save password to keychain if user entered it (not MFA-only mode)
-            if mode != AuthMode::MfaOnly && !keychain_disabled && !username.is_empty() && !password.is_empty() {
+            if mode != AuthMode::MfaOnly && !keychain_disabled && !username.is_empty() && !password.is_empty() && !server_name_clone.is_empty() {
                 // Check if password was manually entered (different from prefilled)
                 let should_save = prefilled_password_clone.as_ref() != Some(&password);
                 if should_save {
+                    let server_clone = server_name_clone.clone();
                     let username_clone = username.clone();
                     let password_clone = password.clone();
                     // Fire and forget - don't block UI
                     std::thread::spawn(move || {
                         if let Ok(rt) = tokio::runtime::Runtime::new() {
-                            let _ = rt.block_on(store_password_in_keychain(&username_clone, &password_clone));
+                            let _ = rt.block_on(store_password_in_keychain(&server_clone, &username_clone, &password_clone));
                             log_debug!("[auth-dialog] Saved password to keychain");
                         }
                     });

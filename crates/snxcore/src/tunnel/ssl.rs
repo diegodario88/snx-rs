@@ -202,6 +202,9 @@ impl SslTunnel {
                     .await;
             }
 
+            // Remove policy routing rules and flush VPN-specific routing table
+            let _ = configurator.remove_routes().await;
+
             if !self.params.no_dns {
                 let config = self.make_resolver_config().await;
                 let _ = self.setup_dns(config, device.name(), true).await;
