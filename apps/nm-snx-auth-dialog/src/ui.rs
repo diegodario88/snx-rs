@@ -129,14 +129,13 @@ impl AuthDialog {
         }
 
         // MFA Token Field (EntryRow) - hidden in PasswordOnly mode
+        // Note: max_length is not available in libadwaita < 1.6, but the connect_changed
+        // handler below enforces the 6-digit limit programmatically
         let mfa_entry = EntryRow::builder()
             .title("MFA Token")
             .activates_default(true)
             .input_purpose(InputPurpose::Number)
             .build();
-
-        // Configure max length for OTP (6 digits + 1 separator = 7)
-        mfa_entry.set_max_length(7);
 
         // Hide MFA field in PasswordOnly mode
         if mode == AuthMode::PasswordOnly {

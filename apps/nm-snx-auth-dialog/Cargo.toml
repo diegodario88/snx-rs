@@ -10,7 +10,7 @@ publish.workspace = true
 
 [dependencies]
 gtk4 = { version = "0.10", features = ["v4_12"] }
-libadwaita = { version = "0.8", features = ["v1_6"] }
+libadwaita = { version = "0.8", features = ["v1_5"] }
 libnm = "0.2"
 getopt = "1.0"
 glib = "0.20"
