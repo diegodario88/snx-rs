@@ -169,10 +169,10 @@ impl LinuxRoutingConfigurator {
         }
 
         // Track this subnet for cleanup
-        if let Ok(mut subnets) = self.added_subnets.lock() {
-            if !subnets.contains(&subnet) {
-                subnets.push(subnet);
-            }
+        if let Ok(mut subnets) = self.added_subnets.lock()
+            && !subnets.contains(&subnet)
+        {
+            subnets.push(subnet);
         }
 
         Ok(())

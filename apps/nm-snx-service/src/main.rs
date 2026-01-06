@@ -23,9 +23,9 @@ const NM_VPN_SERVICE_STATE_STOPPED: u32 = 6;
 
 struct VpnHandle {
     command_sender: mpsc::Sender<TunnelCommand>,
-    /// Keep the connector alive to prevent its Drop from terminating the tunnel
+    /// Sender to forward events to connector for rekey processing
     #[allow(dead_code)]
-    connector: Box<dyn TunnelConnector + Send>,
+    rekey_event_sender: mpsc::Sender<TunnelEvent>,
 }
 
 /// Internal state that's NOT part of the D-Bus interface
@@ -587,6 +587,7 @@ impl VpnPlugin {
 
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let (evt_tx, mut evt_rx) = mpsc::channel(32);
+        let (rekey_tx, mut rekey_rx) = mpsc::channel::<TunnelEvent>(32);
 
         let tunnel = connector
             .create_tunnel(session, cmd_tx.clone())
@@ -599,6 +600,20 @@ impl VpnPlugin {
                 error!("Tunnel error: {}", e);
             }
         });
+
+        // Spawn connector event handler for rekey processing
+        // The connector needs to process RekeyCheck events to refresh the IPSec SA
+        tokio::spawn(async move {
+            while let Some(event) = rekey_rx.recv().await {
+                if let Err(e) = connector.handle_tunnel_event(event).await {
+                    error!("Connector rekey error: {}", e);
+                    break;
+                }
+            }
+        });
+
+        // Clone rekey_tx for the event handler
+        let rekey_tx_clone = rekey_tx.clone();
 
         // Spawn event handler
         let conn_clone = conn.clone();
@@ -724,18 +739,29 @@ impl VpnPlugin {
                         info!("Tunnel disconnected");
                         let _ = VpnPlugin::vpn_state_changed(ctx, NM_VPN_SERVICE_STATE_STOPPED).await;
                     }
-                    _ => {}
+                    TunnelEvent::RekeyCheck => {
+                        // Forward to connector for SA refresh
+                        let _ = rekey_tx_clone.send(TunnelEvent::RekeyCheck).await;
+                    }
+                    TunnelEvent::Rekeyed(addr) => {
+                        info!("IPSec SA rekeyed successfully, address: {}", addr);
+                        let _ = rekey_tx_clone.send(TunnelEvent::Rekeyed(addr)).await;
+                    }
+                    TunnelEvent::RemoteControlData(data) => {
+                        // Forward ISAKMP data to connector for processing
+                        let _ = rekey_tx_clone.send(TunnelEvent::RemoteControlData(data)).await;
+                    }
                 }
             }
             let _ = VpnPlugin::vpn_state_changed(ctx, NM_VPN_SERVICE_STATE_STOPPED).await;
         });
 
-        // Store handle (including connector to keep it alive)
+        // Store handle
         {
             let mut inner = self.inner.lock().await;
             inner.vpn_handle = Some(VpnHandle {
                 command_sender: cmd_tx,
-                connector,
+                rekey_event_sender: rekey_tx,
             });
         }
 

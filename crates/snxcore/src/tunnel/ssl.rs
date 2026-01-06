@@ -377,7 +377,7 @@ impl VpnTunnel for SslTunnel {
             while let Some(item) = snx_receiver.next().await {
                 match item {
                     SlimPacketType::Control(expr) => {
-                        debug!("Control packet received");
+                        trace!("Control packet received");
                         match expr {
                             SExpression::Object(Some(name), _) if name == "keepalive" => {
                                 let _ = keepalive_counter
