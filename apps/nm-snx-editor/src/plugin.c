@@ -654,36 +654,84 @@ build_editor_widget(SnxEditor *editor, NMConnection *connection)
         }
     }
     
-    /* Compute final values using priority: NM > .conf > default */
-    const char *server = get_string_value(nm_server, cfg->server_name, "");
-    const char *username = get_string_value(nm_username, cfg->user_name, "");
-    const char *login_type = get_string_value(nm_login_type, cfg->login_type, "");
-    const char *tunnel_type = get_string_value(nm_tunnel_type, cfg->tunnel_type, "ipsec");
-    const char *cert_type = get_string_value(nm_cert_type, cfg->cert_type, "none");
-    const char *cert_path = get_string_value(nm_cert_path, cfg->cert_path, "");
-    const char *cert_id = get_string_value(nm_cert_id, cfg->cert_id, "");
-    const char *ca_cert = get_string_value(nm_ca_cert, cfg->ca_cert, "");
-    const char *transport_type = get_string_value(nm_transport_type, cfg->transport_type, "auto");
-    const char *search_domains = get_string_value(nm_search_domains, cfg->search_domains, "");
-    const char *ignore_search_domains = get_string_value(nm_ignore_search_domains, cfg->ignore_search_domains, "");
-    const char *dns_servers = get_string_value(nm_dns_servers, cfg->dns_servers, "");
-    const char *ignore_dns_servers = get_string_value(nm_ignore_dns_servers, cfg->ignore_dns_servers, "");
-    const char *add_routes = get_string_value(nm_add_routes, cfg->add_routes, "");
-    const char *ignore_routes = get_string_value(nm_ignore_routes, cfg->ignore_routes, "");
+    /* Compute final values
+     * For NEW connections (no server set): use .conf as defaults for easy migration
+     * For EXISTING connections: only use NM values, don't pollute with .conf values
+     * This prevents settings from one VPN "leaking" into another
+     */
+    gboolean is_new_connection = !has_nm_values;
     
-    gboolean default_route = get_bool_value(nm_default_route, has_nm_values, cfg->default_route, cfg->has_default_route, FALSE);
-    gboolean no_routing = get_bool_value(nm_no_routing, has_nm_values, cfg->no_routing, cfg->has_no_routing, FALSE);
-    gboolean no_dns = get_bool_value(nm_no_dns, has_nm_values, cfg->no_dns, cfg->has_no_dns, FALSE);
-    gboolean no_keychain = get_bool_value(nm_no_keychain, has_nm_values, cfg->no_keychain, cfg->has_no_keychain, TRUE);
-    gboolean ignore_server_cert = get_bool_value(nm_ignore_server_cert, has_nm_values, cfg->ignore_server_cert, cfg->has_ignore_server_cert, FALSE);
-    gboolean ike_persist = get_bool_value(nm_ike_persist, has_nm_values, cfg->ike_persist, cfg->has_ike_persist, FALSE);
-    gboolean no_keepalive = get_bool_value(nm_no_keepalive, has_nm_values, cfg->no_keepalive, cfg->has_no_keepalive, FALSE);
-    gboolean disable_ipv6 = get_bool_value(nm_disable_ipv6, has_nm_values, cfg->disable_ipv6, cfg->has_disable_ipv6, FALSE);
-    gboolean port_knock = get_bool_value(nm_port_knock, has_nm_values, cfg->port_knock, cfg->has_port_knock, FALSE);
-    gboolean set_routing_domains = get_bool_value(nm_set_routing_domains, has_nm_values, cfg->set_routing_domains, cfg->has_set_routing_domains, FALSE);
+    const char *server, *username, *login_type, *tunnel_type, *cert_type;
+    const char *cert_path, *cert_id, *ca_cert, *transport_type;
+    const char *search_domains, *ignore_search_domains, *dns_servers, *ignore_dns_servers;
+    const char *add_routes, *ignore_routes;
+    gboolean default_route, no_routing, no_dns, no_keychain, ignore_server_cert;
+    gboolean ike_persist, no_keepalive, disable_ipv6, port_knock, set_routing_domains;
+    int mtu, ike_lifetime;
     
-    int mtu = get_int_value(nm_mtu, cfg->mtu, cfg->has_mtu, DEFAULT_MTU);
-    int ike_lifetime = get_int_value(nm_ike_lifetime, cfg->ike_lifetime, cfg->has_ike_lifetime, DEFAULT_IKE_LIFETIME);
+    if (is_new_connection) {
+        /* NEW connection: use .conf as defaults for migration from standalone snx-rs */
+        server = get_string_value(nm_server, cfg->server_name, "");
+        username = get_string_value(nm_username, cfg->user_name, "");
+        login_type = get_string_value(nm_login_type, cfg->login_type, "");
+        tunnel_type = get_string_value(nm_tunnel_type, cfg->tunnel_type, "ipsec");
+        cert_type = get_string_value(nm_cert_type, cfg->cert_type, "none");
+        cert_path = get_string_value(nm_cert_path, cfg->cert_path, "");
+        cert_id = get_string_value(nm_cert_id, cfg->cert_id, "");
+        ca_cert = get_string_value(nm_ca_cert, cfg->ca_cert, "");
+        transport_type = get_string_value(nm_transport_type, cfg->transport_type, "auto");
+        search_domains = get_string_value(nm_search_domains, cfg->search_domains, "");
+        ignore_search_domains = get_string_value(nm_ignore_search_domains, cfg->ignore_search_domains, "");
+        dns_servers = get_string_value(nm_dns_servers, cfg->dns_servers, "");
+        ignore_dns_servers = get_string_value(nm_ignore_dns_servers, cfg->ignore_dns_servers, "");
+        add_routes = get_string_value(nm_add_routes, cfg->add_routes, "");
+        ignore_routes = get_string_value(nm_ignore_routes, cfg->ignore_routes, "");
+        
+        default_route = get_bool_value(nm_default_route, has_nm_values, cfg->default_route, cfg->has_default_route, FALSE);
+        no_routing = get_bool_value(nm_no_routing, has_nm_values, cfg->no_routing, cfg->has_no_routing, FALSE);
+        no_dns = get_bool_value(nm_no_dns, has_nm_values, cfg->no_dns, cfg->has_no_dns, FALSE);
+        no_keychain = get_bool_value(nm_no_keychain, has_nm_values, cfg->no_keychain, cfg->has_no_keychain, TRUE);
+        ignore_server_cert = get_bool_value(nm_ignore_server_cert, has_nm_values, cfg->ignore_server_cert, cfg->has_ignore_server_cert, FALSE);
+        ike_persist = get_bool_value(nm_ike_persist, has_nm_values, cfg->ike_persist, cfg->has_ike_persist, FALSE);
+        no_keepalive = get_bool_value(nm_no_keepalive, has_nm_values, cfg->no_keepalive, cfg->has_no_keepalive, FALSE);
+        disable_ipv6 = get_bool_value(nm_disable_ipv6, has_nm_values, cfg->disable_ipv6, cfg->has_disable_ipv6, FALSE);
+        port_knock = get_bool_value(nm_port_knock, has_nm_values, cfg->port_knock, cfg->has_port_knock, FALSE);
+        set_routing_domains = get_bool_value(nm_set_routing_domains, has_nm_values, cfg->set_routing_domains, cfg->has_set_routing_domains, FALSE);
+        
+        mtu = get_int_value(nm_mtu, cfg->mtu, cfg->has_mtu, DEFAULT_MTU);
+        ike_lifetime = get_int_value(nm_ike_lifetime, cfg->ike_lifetime, cfg->has_ike_lifetime, DEFAULT_IKE_LIFETIME);
+    } else {
+        /* EXISTING connection: only use NM values, no .conf fallback */
+        server = nm_server ? nm_server : "";
+        username = nm_username ? nm_username : "";
+        login_type = nm_login_type ? nm_login_type : "";
+        tunnel_type = nm_tunnel_type ? nm_tunnel_type : "ipsec";
+        cert_type = nm_cert_type ? nm_cert_type : "none";
+        cert_path = nm_cert_path ? nm_cert_path : "";
+        cert_id = nm_cert_id ? nm_cert_id : "";
+        ca_cert = nm_ca_cert ? nm_ca_cert : "";
+        transport_type = nm_transport_type ? nm_transport_type : "auto";
+        search_domains = nm_search_domains ? nm_search_domains : "";
+        ignore_search_domains = nm_ignore_search_domains ? nm_ignore_search_domains : "";
+        dns_servers = nm_dns_servers ? nm_dns_servers : "";
+        ignore_dns_servers = nm_ignore_dns_servers ? nm_ignore_dns_servers : "";
+        add_routes = nm_add_routes ? nm_add_routes : "";
+        ignore_routes = nm_ignore_routes ? nm_ignore_routes : "";
+        
+        default_route = nm_default_route ? parse_bool(nm_default_route) : FALSE;
+        no_routing = nm_no_routing ? parse_bool(nm_no_routing) : FALSE;
+        no_dns = nm_no_dns ? parse_bool(nm_no_dns) : FALSE;
+        no_keychain = nm_no_keychain ? parse_bool(nm_no_keychain) : TRUE;
+        ignore_server_cert = nm_ignore_server_cert ? parse_bool(nm_ignore_server_cert) : FALSE;
+        ike_persist = nm_ike_persist ? parse_bool(nm_ike_persist) : FALSE;
+        no_keepalive = nm_no_keepalive ? parse_bool(nm_no_keepalive) : FALSE;
+        disable_ipv6 = nm_disable_ipv6 ? parse_bool(nm_disable_ipv6) : FALSE;
+        port_knock = nm_port_knock ? parse_bool(nm_port_knock) : FALSE;
+        set_routing_domains = nm_set_routing_domains ? parse_bool(nm_set_routing_domains) : FALSE;
+        
+        mtu = nm_mtu ? atoi(nm_mtu) : DEFAULT_MTU;
+        ike_lifetime = nm_ike_lifetime ? atoi(nm_ike_lifetime) : DEFAULT_IKE_LIFETIME;
+    }
     
     /* Main container - no scroll, GNOME Settings provides its own */
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 18);
