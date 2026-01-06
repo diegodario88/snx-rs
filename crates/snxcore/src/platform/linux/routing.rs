@@ -77,26 +77,48 @@ impl LinuxRoutingConfigurator {
         Ok(())
     }
 
-    /// Add iptables mangle rule to mark packets by DESTINATION subnet
-    /// This is the key change: we mark packets going TO specific subnets,
-    /// not packets going OUT of a specific interface
+    /// Add iptables mangle rules to mark packets by DESTINATION subnet
+    /// This marks packets going TO specific subnets, not packets going OUT of a specific interface.
+    /// We add rules to both OUTPUT (for locally generated packets) and PREROUTING
+    /// (for packets from Docker containers, VMs, and other forwarded traffic).
     async fn add_mark_for_subnet(&self, subnet: Ipv4Net) -> anyhow::Result<()> {
         let mark = self.fwmark_hex();
         let subnet_str = subnet.to_string();
 
+        // Add to OUTPUT chain (for locally generated packets from the host)
         debug!(
             "Adding iptables mangle OUTPUT: -d {} -j MARK --set-mark {}",
             subnet_str, mark
         );
-
-        // Use -I (insert) to add at the beginning, ensuring our rules take precedence
-        let result = crate::util::run_command(
+        let _ = crate::util::run_command(
             "iptables",
             [
                 "-t",
                 "mangle",
                 "-I",
                 "OUTPUT",
+                "-d",
+                &subnet_str,
+                "-j",
+                "MARK",
+                "--set-mark",
+                &mark,
+            ],
+        )
+        .await;
+
+        // Add to PREROUTING chain (for packets from Docker, VMs, and other networks)
+        debug!(
+            "Adding iptables mangle PREROUTING: -d {} -j MARK --set-mark {}",
+            subnet_str, mark
+        );
+        let result = crate::util::run_command(
+            "iptables",
+            [
+                "-t",
+                "mangle",
+                "-I",
+                "PREROUTING",
                 "-d",
                 &subnet_str,
                 "-j",
@@ -117,16 +139,16 @@ impl LinuxRoutingConfigurator {
         Ok(())
     }
 
-    /// Remove iptables mangle rule for a specific subnet
+    /// Remove iptables mangle rules for a specific subnet (from both OUTPUT and PREROUTING)
     async fn remove_mark_for_subnet(&self, subnet: Ipv4Net) {
         let mark = self.fwmark_hex();
         let subnet_str = subnet.to_string();
 
+        // Remove from OUTPUT chain
         debug!(
             "Removing iptables mangle OUTPUT: -d {} -j MARK --set-mark {}",
             subnet_str, mark
         );
-
         let _ = crate::util::run_command(
             "iptables",
             [
@@ -134,6 +156,28 @@ impl LinuxRoutingConfigurator {
                 "mangle",
                 "-D",
                 "OUTPUT",
+                "-d",
+                &subnet_str,
+                "-j",
+                "MARK",
+                "--set-mark",
+                &mark,
+            ],
+        )
+        .await;
+
+        // Remove from PREROUTING chain
+        debug!(
+            "Removing iptables mangle PREROUTING: -d {} -j MARK --set-mark {}",
+            subnet_str, mark
+        );
+        let _ = crate::util::run_command(
+            "iptables",
+            [
+                "-t",
+                "mangle",
+                "-D",
+                "PREROUTING",
                 "-d",
                 &subnet_str,
                 "-j",
