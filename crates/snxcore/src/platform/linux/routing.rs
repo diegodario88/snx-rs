@@ -56,10 +56,7 @@ impl LinuxRoutingConfigurator {
     async fn add_route_to_table(&self, route: Ipv4Net) -> anyhow::Result<()> {
         let route_str = route.to_string();
 
-        debug!(
-            "Adding route to table {}: {} dev {}",
-            self.table_id, route, self.device
-        );
+        debug!("Adding route to table {}: {} dev {}", self.table_id, route, self.device);
         let _ = crate::util::run_command(
             "ip",
             [
@@ -102,7 +99,7 @@ impl LinuxRoutingConfigurator {
     /// This marks packets going TO specific subnets, not packets going OUT of a specific interface.
     /// We add rules to both OUTPUT (for locally generated packets) and PREROUTING
     /// (for packets from Docker containers, VMs, and other forwarded traffic).
-    /// 
+    ///
     /// Rules are only added if they don't already exist (prevents duplicates on reconnect).
     async fn add_mark_for_subnet(&self, subnet: Ipv4Net) -> anyhow::Result<()> {
         let mark = self.fwmark_hex();
@@ -262,11 +259,7 @@ impl LinuxRoutingConfigurator {
         let mark = self.fwmark_hex();
 
         debug!("Adding ip rule: fwmark {} lookup {}", mark, self.table_id);
-        crate::util::run_command(
-            "ip",
-            ["rule", "add", "fwmark", &mark, "lookup", &self.table_id_str()],
-        )
-        .await?;
+        crate::util::run_command("ip", ["rule", "add", "fwmark", &mark, "lookup", &self.table_id_str()]).await?;
 
         Ok(())
     }
@@ -275,15 +268,8 @@ impl LinuxRoutingConfigurator {
     async fn cleanup_fwmark_rule(&self) {
         let mark = self.fwmark_hex();
 
-        debug!(
-            "Removing ip rule: fwmark {} lookup {}",
-            mark, self.table_id
-        );
-        let _ = crate::util::run_command(
-            "ip",
-            ["rule", "del", "fwmark", &mark, "lookup", &self.table_id_str()],
-        )
-        .await;
+        debug!("Removing ip rule: fwmark {} lookup {}", mark, self.table_id);
+        let _ = crate::util::run_command("ip", ["rule", "del", "fwmark", &mark, "lookup", &self.table_id_str()]).await;
     }
 
     /// Cleanup all iptables rules we added
@@ -331,15 +317,8 @@ impl RoutingConfigurator for LinuxRoutingConfigurator {
 
         // Also add source-based rule as fallback for response packets
         let src_ip = self.address.to_string();
-        debug!(
-            "Adding policy rule: from {} lookup {}",
-            src_ip, self.table_id
-        );
-        let _ = crate::util::run_command(
-            "ip",
-            ["rule", "add", "from", &src_ip, "lookup", &self.table_id_str()],
-        )
-        .await;
+        debug!("Adding policy rule: from {} lookup {}", src_ip, self.table_id);
+        let _ = crate::util::run_command("ip", ["rule", "add", "from", &src_ip, "lookup", &self.table_id_str()]).await;
 
         Ok(())
     }
@@ -353,32 +332,17 @@ impl RoutingConfigurator for LinuxRoutingConfigurator {
 
         // Remove source-based policy rule
         let src_ip = self.address.to_string();
-        debug!(
-            "Removing policy rule: from {} lookup {}",
-            src_ip, self.table_id
-        );
-        let _ = crate::util::run_command(
-            "ip",
-            ["rule", "del", "from", &src_ip, "lookup", &self.table_id_str()],
-        )
-        .await;
+        debug!("Removing policy rule: from {} lookup {}", src_ip, self.table_id);
+        let _ = crate::util::run_command("ip", ["rule", "del", "from", &src_ip, "lookup", &self.table_id_str()]).await;
 
         // Flush all routes from the VPN-specific table
         debug!("Flushing routing table {}", self.table_id);
-        let _ = crate::util::run_command(
-            "ip",
-            ["route", "flush", "table", &self.table_id_str()],
-        )
-        .await;
+        let _ = crate::util::run_command("ip", ["route", "flush", "table", &self.table_id_str()]).await;
 
         Ok(())
     }
 
-    async fn setup_default_route(
-        &self,
-        destination: Ipv4Addr,
-        disable_ipv6: bool,
-    ) -> anyhow::Result<()> {
+    async fn setup_default_route(&self, destination: Ipv4Addr, disable_ipv6: bool) -> anyhow::Result<()> {
         debug!(
             "Setting up default route through {}, disable IPv6: {disable_ipv6}, table: {}",
             self.device, self.table_id
@@ -399,11 +363,7 @@ impl RoutingConfigurator for LinuxRoutingConfigurator {
             ],
         )
         .await?;
-        crate::util::run_command(
-            "ip",
-            ["rule", "add", "not", "to", &dst, "table", &self.table_id_str()],
-        )
-        .await?;
+        crate::util::run_command("ip", ["rule", "add", "not", "to", &dst, "table", &self.table_id_str()]).await?;
 
         if disable_ipv6 {
             super::sysctl("net.ipv6.conf.all.disable_ipv6", "1")?;
@@ -413,11 +373,7 @@ impl RoutingConfigurator for LinuxRoutingConfigurator {
         Ok(())
     }
 
-    async fn setup_keepalive_route(
-        &self,
-        destination: Ipv4Addr,
-        with_table: bool,
-    ) -> anyhow::Result<()> {
+    async fn setup_keepalive_route(&self, destination: Ipv4Addr, with_table: bool) -> anyhow::Result<()> {
         debug!(
             "Setting up keepalive route through {}, table: {}",
             self.device, self.table_id
@@ -429,15 +385,7 @@ impl RoutingConfigurator for LinuxRoutingConfigurator {
         if with_table {
             crate::util::run_command(
                 "ip",
-                [
-                    "route",
-                    "add",
-                    "table",
-                    &self.table_id_str(),
-                    &dst,
-                    "dev",
-                    &self.device,
-                ],
+                ["route", "add", "table", &self.table_id_str(), &dst, "dev", &self.device],
             )
             .await?;
         }
@@ -462,18 +410,10 @@ impl RoutingConfigurator for LinuxRoutingConfigurator {
         Ok(())
     }
 
-    async fn remove_default_route(
-        &self,
-        destination: Ipv4Addr,
-        enable_ipv6: bool,
-    ) -> anyhow::Result<()> {
+    async fn remove_default_route(&self, destination: Ipv4Addr, enable_ipv6: bool) -> anyhow::Result<()> {
         let dst = destination.to_string();
 
-        crate::util::run_command(
-            "ip",
-            ["rule", "del", "not", "to", &dst, "table", &self.table_id_str()],
-        )
-        .await?;
+        crate::util::run_command("ip", ["rule", "del", "not", "to", &dst, "table", &self.table_id_str()]).await?;
 
         if enable_ipv6 {
             super::sysctl("net.ipv6.conf.all.disable_ipv6", "0")?;

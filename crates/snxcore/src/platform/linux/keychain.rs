@@ -18,12 +18,12 @@ impl SecretServiceKeychain {
 #[async_trait::async_trait]
 impl Keychain for SecretServiceKeychain {
     async fn acquire_password(&self, server: &str, username: &str) -> anyhow::Result<String> {
-        let props = HashMap::from([
-            ("snx-rs.server", server),
-            ("snx-rs.username", username),
-        ]);
+        let props = HashMap::from([("snx-rs.server", server), ("snx-rs.username", username)]);
 
-        debug!("Attempting to acquire password from the keychain for {}@{}", username, server);
+        debug!(
+            "Attempting to acquire password from the keychain for {}@{}",
+            username, server
+        );
 
         let ss = SecretService::connect(EncryptionType::Dh).await?;
         let collection = ss.get_default_collection().await?;
@@ -44,10 +44,7 @@ impl Keychain for SecretServiceKeychain {
     }
 
     async fn store_password(&self, server: &str, username: &str, password: &str) -> anyhow::Result<()> {
-        let props = HashMap::from([
-            ("snx-rs.server", server),
-            ("snx-rs.username", username),
-        ]);
+        let props = HashMap::from([("snx-rs.server", server), ("snx-rs.username", username)]);
 
         let ss = SecretService::connect(EncryptionType::Dh).await?;
         let collection = ss.get_default_collection().await?;
@@ -57,7 +54,10 @@ impl Keychain for SecretServiceKeychain {
             let _ = collection.unlock().await;
         }
 
-        debug!("Attempting to store user password in the keychain for {}@{}", username, server);
+        debug!(
+            "Attempting to store user password in the keychain for {}@{}",
+            username, server
+        );
 
         collection
             .create_item(

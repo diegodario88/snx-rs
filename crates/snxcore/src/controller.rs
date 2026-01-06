@@ -221,7 +221,10 @@ where
                 if !self.username.is_empty()
                     && !params.no_keychain
                     && params.password.is_empty()
-                    && let Ok(password) = Platform::get().new_keychain().acquire_password(&params.server_name, &self.username).await
+                    && let Ok(password) = Platform::get()
+                        .new_keychain()
+                        .acquire_password(&params.server_name, &self.username)
+                        .await
                 {
                     self.password_from_keychain = password;
                 }
@@ -243,7 +246,10 @@ where
         if !params.user_name.is_empty()
             && !params.no_keychain
             && params.password.is_empty()
-            && let Ok(password) = Platform::get().new_keychain().acquire_password(&params.server_name, &params.user_name).await
+            && let Ok(password) = Platform::get()
+                .new_keychain()
+                .acquire_password(&params.server_name, &params.user_name)
+                .await
         {
             self.password_from_keychain = password;
         }
