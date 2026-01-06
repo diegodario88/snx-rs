@@ -77,61 +77,100 @@ impl LinuxRoutingConfigurator {
         Ok(())
     }
 
+    /// Check if an iptables rule already exists
+    async fn iptables_rule_exists(&self, chain: &str, subnet_str: &str, mark: &str) -> bool {
+        crate::util::run_command(
+            "iptables",
+            [
+                "-t",
+                "mangle",
+                "-C",
+                chain,
+                "-d",
+                subnet_str,
+                "-j",
+                "MARK",
+                "--set-mark",
+                mark,
+            ],
+        )
+        .await
+        .is_ok()
+    }
+
     /// Add iptables mangle rules to mark packets by DESTINATION subnet
     /// This marks packets going TO specific subnets, not packets going OUT of a specific interface.
     /// We add rules to both OUTPUT (for locally generated packets) and PREROUTING
     /// (for packets from Docker containers, VMs, and other forwarded traffic).
+    /// 
+    /// Rules are only added if they don't already exist (prevents duplicates on reconnect).
     async fn add_mark_for_subnet(&self, subnet: Ipv4Net) -> anyhow::Result<()> {
         let mark = self.fwmark_hex();
         let subnet_str = subnet.to_string();
 
         // Add to OUTPUT chain (for locally generated packets from the host)
-        debug!(
-            "Adding iptables mangle OUTPUT: -d {} -j MARK --set-mark {}",
-            subnet_str, mark
-        );
-        let _ = crate::util::run_command(
-            "iptables",
-            [
-                "-t",
-                "mangle",
-                "-I",
-                "OUTPUT",
-                "-d",
-                &subnet_str,
-                "-j",
-                "MARK",
-                "--set-mark",
-                &mark,
-            ],
-        )
-        .await;
+        // Only add if rule doesn't already exist
+        if !self.iptables_rule_exists("OUTPUT", &subnet_str, &mark).await {
+            debug!(
+                "Adding iptables mangle OUTPUT: -d {} -j MARK --set-mark {}",
+                subnet_str, mark
+            );
+            let _ = crate::util::run_command(
+                "iptables",
+                [
+                    "-t",
+                    "mangle",
+                    "-I",
+                    "OUTPUT",
+                    "-d",
+                    &subnet_str,
+                    "-j",
+                    "MARK",
+                    "--set-mark",
+                    &mark,
+                ],
+            )
+            .await;
+        } else {
+            debug!(
+                "iptables mangle OUTPUT rule already exists: -d {} -j MARK --set-mark {}",
+                subnet_str, mark
+            );
+        }
 
         // Add to PREROUTING chain (for packets from Docker, VMs, and other networks)
-        debug!(
-            "Adding iptables mangle PREROUTING: -d {} -j MARK --set-mark {}",
-            subnet_str, mark
-        );
-        let result = crate::util::run_command(
-            "iptables",
-            [
-                "-t",
-                "mangle",
-                "-I",
-                "PREROUTING",
-                "-d",
-                &subnet_str,
-                "-j",
-                "MARK",
-                "--set-mark",
-                &mark,
-            ],
-        )
-        .await;
+        // Only add if rule doesn't already exist
+        if !self.iptables_rule_exists("PREROUTING", &subnet_str, &mark).await {
+            debug!(
+                "Adding iptables mangle PREROUTING: -d {} -j MARK --set-mark {}",
+                subnet_str, mark
+            );
+            let _ = crate::util::run_command(
+                "iptables",
+                [
+                    "-t",
+                    "mangle",
+                    "-I",
+                    "PREROUTING",
+                    "-d",
+                    &subnet_str,
+                    "-j",
+                    "MARK",
+                    "--set-mark",
+                    &mark,
+                ],
+            )
+            .await;
+        } else {
+            debug!(
+                "iptables mangle PREROUTING rule already exists: -d {} -j MARK --set-mark {}",
+                subnet_str, mark
+            );
+        }
 
-        if result.is_ok() {
-            // Track this subnet for cleanup
-            if let Ok(mut subnets) = self.added_subnets.lock() {
+        // Track this subnet for cleanup
+        if let Ok(mut subnets) = self.added_subnets.lock() {
+            if !subnets.contains(&subnet) {
                 subnets.push(subnet);
             }
         }
@@ -140,53 +179,82 @@ impl LinuxRoutingConfigurator {
     }
 
     /// Remove iptables mangle rules for a specific subnet (from both OUTPUT and PREROUTING)
+    /// Removes ALL matching rules in a loop to handle duplicate rules from previous connections.
     async fn remove_mark_for_subnet(&self, subnet: Ipv4Net) {
         let mark = self.fwmark_hex();
         let subnet_str = subnet.to_string();
 
-        // Remove from OUTPUT chain
-        debug!(
-            "Removing iptables mangle OUTPUT: -d {} -j MARK --set-mark {}",
-            subnet_str, mark
-        );
-        let _ = crate::util::run_command(
-            "iptables",
-            [
-                "-t",
-                "mangle",
-                "-D",
-                "OUTPUT",
-                "-d",
-                &subnet_str,
-                "-j",
-                "MARK",
-                "--set-mark",
-                &mark,
-            ],
-        )
-        .await;
+        // Remove ALL matching rules from OUTPUT chain (loop until none remain)
+        let mut removed_count = 0;
+        while self.iptables_rule_exists("OUTPUT", &subnet_str, &mark).await {
+            let _ = crate::util::run_command(
+                "iptables",
+                [
+                    "-t",
+                    "mangle",
+                    "-D",
+                    "OUTPUT",
+                    "-d",
+                    &subnet_str,
+                    "-j",
+                    "MARK",
+                    "--set-mark",
+                    &mark,
+                ],
+            )
+            .await;
+            removed_count += 1;
+            // Safety limit to prevent infinite loop
+            if removed_count > 100 {
+                warn!(
+                    "Too many duplicate iptables OUTPUT rules for {} (removed {}), stopping",
+                    subnet_str, removed_count
+                );
+                break;
+            }
+        }
+        if removed_count > 0 {
+            debug!(
+                "Removed {} iptables mangle OUTPUT rule(s): -d {} -j MARK --set-mark {}",
+                removed_count, subnet_str, mark
+            );
+        }
 
-        // Remove from PREROUTING chain
-        debug!(
-            "Removing iptables mangle PREROUTING: -d {} -j MARK --set-mark {}",
-            subnet_str, mark
-        );
-        let _ = crate::util::run_command(
-            "iptables",
-            [
-                "-t",
-                "mangle",
-                "-D",
-                "PREROUTING",
-                "-d",
-                &subnet_str,
-                "-j",
-                "MARK",
-                "--set-mark",
-                &mark,
-            ],
-        )
-        .await;
+        // Remove ALL matching rules from PREROUTING chain (loop until none remain)
+        removed_count = 0;
+        while self.iptables_rule_exists("PREROUTING", &subnet_str, &mark).await {
+            let _ = crate::util::run_command(
+                "iptables",
+                [
+                    "-t",
+                    "mangle",
+                    "-D",
+                    "PREROUTING",
+                    "-d",
+                    &subnet_str,
+                    "-j",
+                    "MARK",
+                    "--set-mark",
+                    &mark,
+                ],
+            )
+            .await;
+            removed_count += 1;
+            // Safety limit to prevent infinite loop
+            if removed_count > 100 {
+                warn!(
+                    "Too many duplicate iptables PREROUTING rules for {} (removed {}), stopping",
+                    subnet_str, removed_count
+                );
+                break;
+            }
+        }
+        if removed_count > 0 {
+            debug!(
+                "Removed {} iptables mangle PREROUTING rule(s): -d {} -j MARK --set-mark {}",
+                removed_count, subnet_str, mark
+            );
+        }
     }
 
     /// Setup the ip rule for fwmark -> table lookup
