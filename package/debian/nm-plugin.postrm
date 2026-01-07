@@ -1,0 +1,14 @@
+#!/bin/bash
+set -e
+
+# Reload D-Bus configuration
+if [ -x /usr/bin/dbus-send ]; then
+    dbus-send --system --type=method_call --dest=org.freedesktop.DBus / org.freedesktop.DBus.ReloadConfig || true
+fi
+
+# Restart NetworkManager to unload the VPN plugin
+if [ -x /usr/bin/systemctl ]; then
+    systemctl restart NetworkManager || true
+fi
+
+exit 0

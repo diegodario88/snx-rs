@@ -1,0 +1,15 @@
+[VPN Connection]
+name=snx
+service=org.freedesktop.NetworkManager.snx
+program=/usr/lib/NetworkManager/nm-snx-service
+supports-multiple-connections=true
+supports-hints=yes
+
+[libnm]
+plugin=libnm-vpn-plugin-snx.so
+
+[GNOME]
+auth-dialog=/usr/lib/NetworkManager/nm-snx-auth-dialog
+properties=libnm-vpn-plugin-snx
+supports-external-ui-mode=false
+supports-hints=true

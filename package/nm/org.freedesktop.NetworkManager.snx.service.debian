@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.freedesktop.NetworkManager.snx
+Exec=/usr/lib/NetworkManager/nm-snx-service
+User=root

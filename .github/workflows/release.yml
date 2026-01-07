@@ -46,7 +46,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev libgtk-4-dev makeself libwebkitgtk-6.0-dev rpm fakeroot
+          sudo apt-get install -y pkg-config libssl-dev libgtk-4-dev makeself libwebkitgtk-6.0-dev rpm fakeroot libadwaita-1-dev libnm-dev meson
 
       - name: Install Rust
         run: |
@@ -68,6 +68,16 @@ jobs:
 
       - name: Package project with mobile-access feature
         run: ./package/package.sh -webkit
+
+      - name: Build NetworkManager plugin
+        run: |
+          chmod +x package/build-nm-plugin.sh
+          ./package/build-nm-plugin.sh
+
+      - name: Package NetworkManager plugin
+        run: |
+          chmod +x package/package-nm-plugin-deb.sh
+          ./package/package-nm-plugin-deb.sh
 
       - name: Create Release
         uses: actions/github-script@v7
@@ -107,6 +117,18 @@ jobs:
                 });
               }
             }
+
+            // Upload NetworkManager plugin .deb
+            const nmPluginName = `networkmanager-snx-${tagName}-linux-x86_64.deb`;
+            const nmPluginPath = `target/${nmPluginName}`;
+            const nmPlugin = fs.readFileSync(nmPluginPath);
+            await github.rest.repos.uploadReleaseAsset({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: release.data.id,
+              name: nmPluginName,
+              data: nmPlugin
+            });
 
             if (tagName.endsWith("-test")) {
               await github.rest.repos.deleteRelease({
