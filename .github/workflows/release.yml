@@ -22,6 +22,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Extract changelog for tag
         id: changelog
@@ -30,6 +32,11 @@ jobs:
 
           if [[ "$TAG_NAME" == "main" || "$TAG_NAME" == "master" ]]; then
             TAG_NAME="v0.0.0-test"
+          fi
+
+          if ! git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+            echo "Creating local tag $TAG_NAME for packaging scripts"
+            git tag "$TAG_NAME"
           fi
 
           VERSION_NAME=$(echo $TAG_NAME | sed 's/^v//;s/-test//')
