@@ -71,21 +71,21 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           source $HOME/.cargo/env
 
-      - name: Build project
-        run: |
-          chmod +x package/build-lto.sh
-          ./package/build-lto.sh --features=vendored-openssl,vendored-sqlite
+      # - name: Build project
+      #   run: |
+      #     chmod +x package/build-lto.sh
+      #     ./package/build-lto.sh --features=vendored-openssl,vendored-sqlite
 
-      - name: Package project
-        run: |
-          chmod +x package/package.sh
-          ./package/package.sh
+      # - name: Package project
+      #   run: |
+      #     chmod +x package/package.sh
+      #     ./package/package.sh
 
-      - name: Build project with mobile-access feature
-        run: ./package/build-lto.sh --features=vendored-openssl,vendored-sqlite,mobile-access
+      # - name: Build project with mobile-access feature
+      #   run: ./package/build-lto.sh --features=vendored-openssl,vendored-sqlite,mobile-access
 
-      - name: Package project with mobile-access feature
-        run: ./package/package.sh -webkit
+      # - name: Package project with mobile-access feature
+      #   run: ./package/package.sh -webkit
 
       - name: Build NetworkManager plugin
         run: |
