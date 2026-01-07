@@ -95,7 +95,12 @@ jobs:
       - name: Package NetworkManager plugin
         run: |
           chmod +x package/package-nm-plugin-deb.sh
-          ./package/package-nm-plugin-deb.sh
+          TAG_NAME=${{ env.tag_name }} ./package/package-nm-plugin-deb.sh
+
+      - name: List generated packages
+        run: |
+          echo "Looking for .deb files in target/:"
+          ls -la target/*.deb || echo "No .deb files found"
 
       - name: Create Release
         uses: actions/github-script@v7

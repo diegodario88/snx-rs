@@ -11,9 +11,11 @@ set -e
 basedir="$(dirname $(readlink -f $0))/.."
 target="$basedir/target"
 
-# Get version from git tag or Cargo.toml
-if git -C "$basedir" describe --tags --exact-match HEAD 2>/dev/null; then
-    version="$(git -C "$basedir" describe --tags)"
+# Get version from environment variable, git tag, or Cargo.toml
+if [ -n "$TAG_NAME" ]; then
+    version="$TAG_NAME"
+elif git -C "$basedir" describe --tags --exact-match HEAD >/dev/null 2>&1; then
+    version="$(git -C "$basedir" describe --tags --exact-match HEAD)"
 else
     # Fallback to Cargo.toml version
     version="v$(grep '^version' "$basedir/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')"
