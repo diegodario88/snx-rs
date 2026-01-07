@@ -1,10 +1,7 @@
 use gtk4::prelude::*;
-use gtk4::{Align, InputPurpose, Orientation};
+use gtk4::{Align, Entry, InputPurpose, Label, Orientation, PasswordEntry};
 use libadwaita::prelude::*;
-use libadwaita::{
-    Application, ApplicationWindow, EntryRow, HeaderBar, PasswordEntryRow, PreferencesGroup, PreferencesPage,
-    ToolbarView,
-};
+use libadwaita::{Application, ApplicationWindow, HeaderBar};
 use std::rc::Rc;
 
 /// UI display mode
@@ -20,9 +17,9 @@ pub enum AuthMode {
 
 pub struct AuthDialog {
     pub window: ApplicationWindow,
-    pub username_entry: EntryRow,
-    pub password_entry: PasswordEntryRow,
-    pub mfa_entry: EntryRow,
+    pub username_entry: Entry,
+    pub password_entry: PasswordEntry,
+    pub mfa_entry: Entry,
     pub cancel_button: gtk4::Button,
     pub connect_button: gtk4::Button,
 }
@@ -61,12 +58,12 @@ impl AuthDialog {
             .resizable(false)
             .build();
 
-        // Main Layout Structure using ToolbarView
-        let content = ToolbarView::new();
+        // Main Layout Structure using Box + HeaderBar (compatible with libadwaita 1.1)
+        let main_box = gtk4::Box::new(Orientation::Vertical, 0);
 
         // Header Bar (Title + Window Controls)
         let header = HeaderBar::new();
-        content.add_top_bar(&header);
+        main_box.append(&header);
 
         // Content Area with Clamp for better sizing
         let clamp = libadwaita::Clamp::builder()
@@ -75,42 +72,66 @@ impl AuthDialog {
             .build();
 
         // Main vertical box - align to start so it doesn't expand
-        let vbox = gtk4::Box::new(Orientation::Vertical, 0);
-        vbox.set_margin_top(12);
-        vbox.set_margin_bottom(12);
-        vbox.set_margin_start(12);
-        vbox.set_margin_end(12);
+        let vbox = gtk4::Box::new(Orientation::Vertical, 12);
+        vbox.set_margin_top(24);
+        vbox.set_margin_bottom(24);
+        vbox.set_margin_start(24);
+        vbox.set_margin_end(24);
         vbox.set_valign(Align::Start);
 
-        // Page & Group for Form Fields
-        let page = PreferencesPage::new();
-
-        let (group_title, group_description) = match mode {
+        // Title label
+        let (title_text, description_text) = match mode {
             AuthMode::MfaOnly => ("Two-Factor Authentication", "Enter the code from your authenticator."),
             AuthMode::PasswordOnly => ("Credentials", "Enter your VPN password."),
             AuthMode::Full => ("Credentials", "Enter your VPN credentials and OTP code."),
         };
 
-        let group = PreferencesGroup::builder()
-            .title(group_title)
-            .description(group_description)
-            .build();
+        let title_label = Label::new(Some(title_text));
+        title_label.add_css_class("title-2");
+        title_label.set_halign(Align::Start);
+        vbox.append(&title_label);
 
-        // Username Field (EntryRow) - hidden in MFA-only mode
-        let username_entry = EntryRow::builder().title("Username").activates_default(true).build();
+        let desc_label = Label::new(Some(description_text));
+        desc_label.add_css_class("dim-label");
+        desc_label.set_halign(Align::Start);
+        desc_label.set_margin_bottom(12);
+        vbox.append(&desc_label);
+
+        // Form fields container
+        let form_box = gtk4::Box::new(Orientation::Vertical, 12);
+
+        // Username Field - hidden in MFA-only mode
+        let username_box = gtk4::Box::new(Orientation::Vertical, 4);
+        let username_label = Label::new(Some("Username"));
+        username_label.set_halign(Align::Start);
+        username_label.add_css_class("dim-label");
+        let username_entry = Entry::builder()
+            .placeholder_text("Username")
+            .activates_default(true)
+            .build();
 
         if let Some(user) = &username {
             username_entry.set_text(user);
         }
 
+        username_box.append(&username_label);
+        username_box.append(&username_entry);
+
         if mode == AuthMode::MfaOnly {
-            username_entry.set_visible(false);
+            username_box.set_visible(false);
         }
 
-        // Password Field (PasswordEntryRow) - hidden in MFA-only mode
-        let password_entry = PasswordEntryRow::builder()
-            .title("Password")
+        form_box.append(&username_box);
+
+        // Password Field - hidden in MFA-only mode
+        let password_box = gtk4::Box::new(Orientation::Vertical, 4);
+        let password_label = Label::new(Some("Password"));
+        password_label.set_halign(Align::Start);
+        password_label.add_css_class("dim-label");
+        let password_entry = PasswordEntry::builder()
+            .placeholder_text("Password")
             .activates_default(true)
+            .show_peek_icon(true)
             .build();
 
         let mut password_filled = false;
@@ -121,25 +142,36 @@ impl AuthDialog {
             password_filled = true;
         }
 
+        password_box.append(&password_label);
+        password_box.append(&password_entry);
+
         if mode == AuthMode::MfaOnly {
-            password_entry.set_visible(false);
+            password_box.set_visible(false);
         } else if password_filled {
             // In regular mode, hide password field if already filled
-            password_entry.set_visible(false);
+            password_box.set_visible(false);
         }
 
-        // MFA Token Field (EntryRow) - hidden in PasswordOnly mode
-        // Note: max_length is not available in libadwaita < 1.6, but the connect_changed
-        // handler below enforces the 6-digit limit programmatically
-        let mfa_entry = EntryRow::builder()
-            .title("MFA Token")
+        form_box.append(&password_box);
+
+        // MFA Token Field - hidden in PasswordOnly mode
+        let mfa_box = gtk4::Box::new(Orientation::Vertical, 4);
+        let mfa_label = Label::new(Some("MFA Token"));
+        mfa_label.set_halign(Align::Start);
+        mfa_label.add_css_class("dim-label");
+        let mfa_entry = Entry::builder()
+            .placeholder_text("123-456")
             .activates_default(true)
             .input_purpose(InputPurpose::Number)
+            .max_length(7) // 6 digits + 1 separator
             .build();
+
+        mfa_box.append(&mfa_label);
+        mfa_box.append(&mfa_entry);
 
         // Hide MFA field in PasswordOnly mode
         if mode == AuthMode::PasswordOnly {
-            mfa_entry.set_visible(false);
+            mfa_box.set_visible(false);
         }
 
         // Auto-format OTP as user types (e.g., 123456 -> 123-456)
@@ -166,17 +198,13 @@ impl AuthDialog {
             }
         });
 
-        group.add(&username_entry);
-        group.add(&password_entry);
-        group.add(&mfa_entry);
-        page.add(&group);
-        vbox.append(&page);
+        form_box.append(&mfa_box);
+        vbox.append(&form_box);
 
         // Action Buttons
         let hbox_buttons = gtk4::Box::new(Orientation::Horizontal, 12);
         hbox_buttons.set_halign(Align::Center);
         hbox_buttons.set_margin_top(24);
-        hbox_buttons.set_margin_bottom(12);
 
         let cancel_button = gtk4::Button::with_label("Cancel");
         cancel_button.set_width_request(100);
@@ -219,9 +247,9 @@ impl AuthDialog {
         }
 
         clamp.set_child(Some(&vbox));
-        content.set_content(Some(&clamp));
+        main_box.append(&clamp);
 
-        window.set_content(Some(&content));
+        window.set_content(Some(&main_box));
 
         Rc::new(Self {
             window,
