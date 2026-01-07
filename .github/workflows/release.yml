@@ -3,8 +3,14 @@ name: Create Release on Tag
 on:
   push:
     tags:
-      - 'v*.*.*'
-      - 'v*.*.*-test'
+      - "v*.*.*"
+      - "v*.*.*-test"
+  workflow_dispatch:
+    inputs:
+      test_tag:
+        description: "Dummy tag for testing (must end in -test to avoid polluting the repo)"
+        required: false
+        default: "v0.0.0-test"
 
 permissions:
   contents: write
@@ -16,29 +22,34 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref }}
 
       - name: Extract changelog for tag
         id: changelog
         run: |
-          TAG_NAME=$(echo ${{ github.ref_name }})
+          TAG_NAME=${{ inputs.test_tag || github.ref_name }}
+
+          if [[ "$TAG_NAME" == "main" || "$TAG_NAME" == "master" ]]; then
+            TAG_NAME="v0.0.0-test"
+          fi
+
           VERSION_NAME=$(echo $TAG_NAME | sed 's/^v//;s/-test//')
           VERSION_HEADER=$(echo $TAG_NAME | sed 's/-test//')
+
           echo "Extracting changelog for tag: $TAG_NAME"
 
-          # Find the changelog section for this tag
           CHANGELOG=$(awk -v tag="## $VERSION_HEADER " '$0 ~ tag {flag=1; next} /^## / && flag {flag=0} flag && /^-/ {print}' CHANGELOG.md)
 
           if [ -z "$CHANGELOG" ]; then
-            echo "No changelog entries found for $TAG_NAME"
-            exit 1
+            if [[ "$TAG_NAME" == *"-test"* ]]; then
+              CHANGELOG="Test build: Automaticaly generated notes for $TAG_NAME"
+            else
+              echo "Error: No changelog entries found for $TAG_NAME"
+              exit 1
+            fi
           fi
 
-          # Format release notes
-          RELEASE_NOTES="$CHANGELOG"
           echo "release_notes<<EOF" >> $GITHUB_ENV
-          echo "$RELEASE_NOTES" >> $GITHUB_ENV
+          echo "$CHANGELOG" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
           echo "tag_name=$TAG_NAME" >> $GITHUB_ENV
           echo "version_name=$VERSION_NAME" >> $GITHUB_ENV
@@ -90,7 +101,7 @@ jobs:
             const releaseNotes = process.env.release_notes;
             const extensions = ["tar.xz", "run", "deb", "rpm"];
             const suffixes = ["", "-webkit"];
-            
+
             const release = await github.rest.repos.createRelease({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -104,7 +115,7 @@ jobs:
             for (const suffix of suffixes) {
               for (const extension of extensions) {
                 if ((extension === "deb" || extension === "rpm") && suffix === "-webkit") continue;
-            
+
                 const artifactName = `snx-rs-${tagName}${suffix}-linux-x86_64.${extension}`;
                 const artifactPath = `target/${artifactName}`;
                 const artifact = fs.readFileSync(artifactPath);
