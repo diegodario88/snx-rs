@@ -6,6 +6,10 @@ use tracing::{debug, warn};
 
 use crate::platform::RoutingConfigurator;
 
+/// Shared iptables chain for all SNX VPN routing marks.
+/// All VPNs share this chain, with rules ordered by prefix specificity.
+const SNX_CHAIN: &str = "SNX_ROUTES";
+
 /// Generate a unique routing table ID and fwmark from device name
 /// Uses a simple hash to get a number in range 100-65000
 fn generate_table_id(device: &str) -> u32 {
@@ -15,13 +19,289 @@ fn generate_table_id(device: &str) -> u32 {
     100 + (hash % 64900) // Range: 100-65000
 }
 
+/// Ensure the shared SNX_ROUTES chain exists and is linked from OUTPUT/PREROUTING.
+/// This is idempotent - safe to call multiple times.
+async fn ensure_snx_chain_exists() {
+    // Try to create chain (ignore error if already exists)
+    let _ = crate::util::run_command("iptables", ["-t", "mangle", "-N", SNX_CHAIN]).await;
+
+    // Check if jump from OUTPUT exists
+    let output_jump_exists = crate::util::run_command("iptables", ["-t", "mangle", "-C", "OUTPUT", "-j", SNX_CHAIN])
+        .await
+        .is_ok();
+
+    if !output_jump_exists {
+        debug!("Adding jump from OUTPUT to {}", SNX_CHAIN);
+        let _ = crate::util::run_command("iptables", ["-t", "mangle", "-I", "OUTPUT", "-j", SNX_CHAIN]).await;
+    }
+
+    // Check if jump from PREROUTING exists
+    let prerouting_jump_exists =
+        crate::util::run_command("iptables", ["-t", "mangle", "-C", "PREROUTING", "-j", SNX_CHAIN])
+            .await
+            .is_ok();
+
+    if !prerouting_jump_exists {
+        debug!("Adding jump from PREROUTING to {}", SNX_CHAIN);
+        let _ = crate::util::run_command("iptables", ["-t", "mangle", "-I", "PREROUTING", "-j", SNX_CHAIN]).await;
+    }
+}
+
+/// Check if a MARK rule for this subnet/mark already exists in SNX_ROUTES
+async fn mark_rule_exists(subnet_str: &str, mark: &str) -> bool {
+    crate::util::run_command(
+        "iptables",
+        [
+            "-t",
+            "mangle",
+            "-C",
+            SNX_CHAIN,
+            "-d",
+            subnet_str,
+            "-j",
+            "MARK",
+            "--set-mark",
+            mark,
+        ],
+    )
+    .await
+    .is_ok()
+}
+
+/// Check if a RETURN rule for this subnet/mark already exists in SNX_ROUTES
+async fn return_rule_exists(subnet_str: &str, mark: &str) -> bool {
+    crate::util::run_command(
+        "iptables",
+        [
+            "-t", "mangle", "-C", SNX_CHAIN, "-d", subnet_str, "-m", "mark", "--mark", mark, "-j", "RETURN",
+        ],
+    )
+    .await
+    .is_ok()
+}
+
+/// Extract prefix length from a CIDR string like "172.16.0.0/16"
+fn parse_prefix_len(cidr: &str) -> Option<u8> {
+    cidr.split('/').nth(1).and_then(|s| s.parse().ok())
+}
+
+/// Extract the destination CIDR from an iptables rule line.
+/// Example line: "MARK       all  --  0.0.0.0/0            172.16.0.0/16        MARK set 0x6f"
+/// The format with `iptables -L CHAIN -n` (no -v) and split_whitespace is:
+///   TARGET(0) PROT(1) OPT(2) SOURCE(3) DESTINATION(4) ...
+/// Returns the destination (e.g., "172.16.0.0/16" or "200.201.213.46") if found.
+fn extract_destination_from_rule(line: &str) -> Option<&str> {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    // Format: TARGET(0) PROT(1) OPT(2) SOURCE(3) DESTINATION(4) ...
+    if parts.len() >= 5 {
+        let dest = parts[4];
+        // Skip if it's the wildcard "0.0.0.0/0"
+        if dest != "0.0.0.0/0" && dest.contains('/') {
+            return Some(dest);
+        }
+        // Also handle single IPs without prefix (treated as /32)
+        if dest != "0.0.0.0/0" && !dest.contains('/') && dest.contains('.') {
+            return Some(dest);
+        }
+    }
+    None
+}
+
+/// Check if adding a rule for `subnet` would conflict with an existing rule
+/// from a DIFFERENT VPN (different fwmark) that has the EXACT SAME subnet.
+///
+/// Strategy: Only skip if exact same subnet exists with different mark.
+/// Different prefix lengths can coexist - iptables processes rules in order,
+/// so more specific rules (added first via find_insert_position) will match first.
+///
+/// Returns true if we should skip adding our rule.
+async fn check_exact_duplicate_rule(subnet: Ipv4Net, our_mark: &str) -> bool {
+    let output = crate::util::run_command("iptables", ["-t", "mangle", "-L", SNX_CHAIN, "-n"])
+        .await
+        .unwrap_or_default();
+
+    for line in output.lines().skip(2) {
+        // Only check MARK rules
+        if !line.trim_start().starts_with("MARK") {
+            continue;
+        }
+
+        // Skip rules with our own mark
+        if line.contains(our_mark) {
+            continue;
+        }
+
+        if let Some(dest) = extract_destination_from_rule(line) {
+            // Parse the existing rule's destination
+            let existing_subnet: Ipv4Net = if dest.contains('/') {
+                match dest.parse() {
+                    Ok(net) => net,
+                    Err(_) => continue,
+                }
+            } else {
+                // Single IP, treat as /32
+                match dest.parse::<std::net::Ipv4Addr>() {
+                    Ok(ip) => Ipv4Net::new(ip, 32).unwrap(),
+                    Err(_) => continue,
+                }
+            };
+
+            // Only skip if EXACT same subnet (same network AND same prefix length)
+            if existing_subnet == subnet {
+                debug!(
+                    "Skipping iptables rule for {} (mark {}): exact same subnet exists from another VPN",
+                    subnet, our_mark
+                );
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Find all subnets in SNX_ROUTES that have MARK rules with the specified fwmark.
+/// This is used during cleanup to discover which rules belong to this VPN instance,
+/// without relying on in-memory state (which is lost when the configurator is dropped).
+async fn find_subnets_for_mark(mark: &str) -> Vec<Ipv4Net> {
+    let output = crate::util::run_command("iptables", ["-t", "mangle", "-L", SNX_CHAIN, "-n"])
+        .await
+        .unwrap_or_default();
+
+    debug!("iptables -L {} output ({} bytes):\n{}", SNX_CHAIN, output.len(), output);
+
+    let mut subnets = Vec::new();
+    for line in output.lines().skip(2) {
+        // Look for MARK rules with our specific mark value
+        // Example: "MARK       all  --  0.0.0.0/0            172.16.0.0/16        MARK set 0x6f"
+        if line.trim_start().starts_with("MARK") && line.contains(mark) {
+            if let Some(dest) = extract_destination_from_rule(line) {
+                if let Ok(subnet) = dest.parse::<Ipv4Net>() {
+                    subnets.push(subnet);
+                }
+            }
+        }
+    }
+
+    if !subnets.is_empty() {
+        debug!(
+            "Found {} subnet(s) in {} for mark {}: {:?}",
+            subnets.len(),
+            SNX_CHAIN,
+            mark,
+            subnets
+        );
+    }
+
+    subnets
+}
+
+/// Find the correct position to insert a rule based on prefix length.
+/// Rules with larger prefix (more specific) should come FIRST.
+/// Returns the 1-based position for iptables -I.
+async fn find_insert_position(prefix_len: u8) -> u32 {
+    let output = crate::util::run_command("iptables", ["-t", "mangle", "-L", SNX_CHAIN, "-n"])
+        .await
+        .unwrap_or_default();
+
+    let lines: Vec<&str> = output.lines().skip(2).filter(|l| !l.is_empty()).collect();
+    let rule_count = lines.len();
+
+    debug!(
+        "find_insert_position: looking for position for /{}, chain has {} rules",
+        prefix_len, rule_count
+    );
+
+    // If chain is empty, insert at position 1
+    if rule_count == 0 {
+        debug!("find_insert_position: chain is empty, returning position 1");
+        return 1;
+    }
+
+    let mut position = 1u32;
+    let mut i = 0;
+
+    // Process rules in pairs (MARK + RETURN)
+    while i < lines.len() {
+        let line = lines[i];
+
+        // Only process MARK rules
+        if !line.trim_start().starts_with("MARK") {
+            // Skip non-MARK rules (shouldn't happen in a well-formed chain)
+            position += 1;
+            i += 1;
+            continue;
+        }
+
+        if let Some(dest) = extract_destination_from_rule(line) {
+            // Get prefix length, treating single IPs as /32
+            let existing_prefix = if dest.contains('/') {
+                parse_prefix_len(dest).unwrap_or(0)
+            } else {
+                32 // Single IP
+            };
+
+            debug!(
+                "find_insert_position: rule at pos {}: dest={}, existing_prefix={}, our_prefix={}",
+                position, dest, existing_prefix, prefix_len
+            );
+
+            if existing_prefix >= prefix_len {
+                // Existing rule is more specific or equal, insert after this MARK+RETURN pair
+                position += 2; // Skip MARK + RETURN pair
+                i += 2; // Move past both MARK and RETURN in our iteration
+            } else {
+                // Found a less specific rule, insert before it
+                debug!(
+                    "find_insert_position: found less specific rule, inserting at position {}",
+                    position
+                );
+                break;
+            }
+        } else {
+            // Couldn't parse destination, log the line for debugging
+            debug!(
+                "find_insert_position: couldn't parse destination from MARK rule: '{}'",
+                line
+            );
+            position += 1;
+            i += 1;
+        }
+    }
+
+    debug!(
+        "find_insert_position: returning position {} for /{}",
+        position, prefix_len
+    );
+    position
+}
+
+/// Remove the SNX_ROUTES chain if it's empty (no more VPNs connected)
+async fn maybe_cleanup_empty_chain() {
+    let output = crate::util::run_command("iptables", ["-t", "mangle", "-L", SNX_CHAIN, "-n"])
+        .await
+        .unwrap_or_default();
+
+    // Count rules (skip 2 header lines)
+    let rule_count = output.lines().skip(2).filter(|l| !l.is_empty()).count();
+
+    if rule_count == 0 {
+        debug!("{} chain is empty, removing it", SNX_CHAIN);
+
+        // Remove jumps from OUTPUT and PREROUTING
+        let _ = crate::util::run_command("iptables", ["-t", "mangle", "-D", "OUTPUT", "-j", SNX_CHAIN]).await;
+        let _ = crate::util::run_command("iptables", ["-t", "mangle", "-D", "PREROUTING", "-j", SNX_CHAIN]).await;
+
+        // Delete the chain (must be empty and not referenced)
+        let _ = crate::util::run_command("iptables", ["-t", "mangle", "-X", SNX_CHAIN]).await;
+    }
+}
+
 pub struct LinuxRoutingConfigurator {
     device: String,
     address: Ipv4Addr,
     table_id: u32,
     fwmark: u32,
-    /// Subnets that we added iptables rules for (for cleanup)
-    added_subnets: std::sync::Mutex<Vec<Ipv4Net>>,
 }
 
 impl LinuxRoutingConfigurator {
@@ -39,7 +319,6 @@ impl LinuxRoutingConfigurator {
             address,
             table_id,
             fwmark,
-            added_subnets: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -74,123 +353,21 @@ impl LinuxRoutingConfigurator {
         Ok(())
     }
 
-    /// Check if an iptables rule already exists
-    async fn iptables_rule_exists(&self, chain: &str, subnet_str: &str, mark: &str) -> bool {
-        crate::util::run_command(
-            "iptables",
-            [
-                "-t",
-                "mangle",
-                "-C",
-                chain,
-                "-d",
-                subnet_str,
-                "-j",
-                "MARK",
-                "--set-mark",
-                mark,
-            ],
-        )
-        .await
-        .is_ok()
-    }
-
-    /// Add iptables mangle rules to mark packets by DESTINATION subnet
-    /// This marks packets going TO specific subnets, not packets going OUT of a specific interface.
-    /// We add rules to both OUTPUT (for locally generated packets) and PREROUTING
-    /// (for packets from Docker containers, VMs, and other forwarded traffic).
-    ///
-    /// Rules are only added if they don't already exist (prevents duplicates on reconnect).
-    async fn add_mark_for_subnet(&self, subnet: Ipv4Net) -> anyhow::Result<()> {
-        let mark = self.fwmark_hex();
-        let subnet_str = subnet.to_string();
-
-        // Add to OUTPUT chain (for locally generated packets from the host)
-        // Only add if rule doesn't already exist
-        if !self.iptables_rule_exists("OUTPUT", &subnet_str, &mark).await {
-            debug!(
-                "Adding iptables mangle OUTPUT: -d {} -j MARK --set-mark {}",
-                subnet_str, mark
-            );
-            let _ = crate::util::run_command(
-                "iptables",
-                [
-                    "-t",
-                    "mangle",
-                    "-I",
-                    "OUTPUT",
-                    "-d",
-                    &subnet_str,
-                    "-j",
-                    "MARK",
-                    "--set-mark",
-                    &mark,
-                ],
-            )
-            .await;
-        } else {
-            debug!(
-                "iptables mangle OUTPUT rule already exists: -d {} -j MARK --set-mark {}",
-                subnet_str, mark
-            );
-        }
-
-        // Add to PREROUTING chain (for packets from Docker, VMs, and other networks)
-        // Only add if rule doesn't already exist
-        if !self.iptables_rule_exists("PREROUTING", &subnet_str, &mark).await {
-            debug!(
-                "Adding iptables mangle PREROUTING: -d {} -j MARK --set-mark {}",
-                subnet_str, mark
-            );
-            let _ = crate::util::run_command(
-                "iptables",
-                [
-                    "-t",
-                    "mangle",
-                    "-I",
-                    "PREROUTING",
-                    "-d",
-                    &subnet_str,
-                    "-j",
-                    "MARK",
-                    "--set-mark",
-                    &mark,
-                ],
-            )
-            .await;
-        } else {
-            debug!(
-                "iptables mangle PREROUTING rule already exists: -d {} -j MARK --set-mark {}",
-                subnet_str, mark
-            );
-        }
-
-        // Track this subnet for cleanup
-        if let Ok(mut subnets) = self.added_subnets.lock()
-            && !subnets.contains(&subnet)
-        {
-            subnets.push(subnet);
-        }
-
-        Ok(())
-    }
-
-    /// Remove iptables mangle rules for a specific subnet (from both OUTPUT and PREROUTING)
-    /// Removes ALL matching rules in a loop to handle duplicate rules from previous connections.
+    /// Remove iptables mangle rules for a specific subnet from SNX_ROUTES chain.
     async fn remove_mark_for_subnet(&self, subnet: Ipv4Net) {
         let mark = self.fwmark_hex();
         let subnet_str = subnet.to_string();
 
-        // Remove ALL matching rules from OUTPUT chain (loop until none remain)
-        let mut removed_count = 0;
-        while self.iptables_rule_exists("OUTPUT", &subnet_str, &mark).await {
+        // Remove MARK rule (loop to handle any duplicates)
+        let mut removed = 0;
+        while mark_rule_exists(&subnet_str, &mark).await && removed < 10 {
             let _ = crate::util::run_command(
                 "iptables",
                 [
                     "-t",
                     "mangle",
                     "-D",
-                    "OUTPUT",
+                    SNX_CHAIN,
                     "-d",
                     &subnet_str,
                     "-j",
@@ -200,56 +377,37 @@ impl LinuxRoutingConfigurator {
                 ],
             )
             .await;
-            removed_count += 1;
-            // Safety limit to prevent infinite loop
-            if removed_count > 100 {
-                warn!(
-                    "Too many duplicate iptables OUTPUT rules for {} (removed {}), stopping",
-                    subnet_str, removed_count
-                );
-                break;
-            }
-        }
-        if removed_count > 0 {
-            debug!(
-                "Removed {} iptables mangle OUTPUT rule(s): -d {} -j MARK --set-mark {}",
-                removed_count, subnet_str, mark
-            );
+            removed += 1;
         }
 
-        // Remove ALL matching rules from PREROUTING chain (loop until none remain)
-        removed_count = 0;
-        while self.iptables_rule_exists("PREROUTING", &subnet_str, &mark).await {
+        // Remove RETURN rule (loop to handle any duplicates)
+        let mut return_removed = 0;
+        while return_rule_exists(&subnet_str, &mark).await && return_removed < 10 {
             let _ = crate::util::run_command(
                 "iptables",
                 [
                     "-t",
                     "mangle",
                     "-D",
-                    "PREROUTING",
+                    SNX_CHAIN,
                     "-d",
                     &subnet_str,
-                    "-j",
-                    "MARK",
-                    "--set-mark",
+                    "-m",
+                    "mark",
+                    "--mark",
                     &mark,
+                    "-j",
+                    "RETURN",
                 ],
             )
             .await;
-            removed_count += 1;
-            // Safety limit to prevent infinite loop
-            if removed_count > 100 {
-                warn!(
-                    "Too many duplicate iptables PREROUTING rules for {} (removed {}), stopping",
-                    subnet_str, removed_count
-                );
-                break;
-            }
+            return_removed += 1;
         }
-        if removed_count > 0 {
+
+        if removed > 0 || return_removed > 0 {
             debug!(
-                "Removed {} iptables mangle PREROUTING rule(s): -d {} -j MARK --set-mark {}",
-                removed_count, subnet_str, mark
+                "Removed iptables rules from {}: -d {} --set-mark {} ({} MARK, {} RETURN)",
+                SNX_CHAIN, subnet_str, mark, removed, return_removed
             );
         }
     }
@@ -272,19 +430,117 @@ impl LinuxRoutingConfigurator {
         let _ = crate::util::run_command("ip", ["rule", "del", "fwmark", &mark, "lookup", &self.table_id_str()]).await;
     }
 
-    /// Cleanup all iptables rules we added
+    /// Cleanup all iptables rules for this VPN's fwmark.
+    /// Uses dynamic discovery by parsing iptables output to find rules with our fwmark,
+    /// rather than relying on in-memory state (which is lost when configurator is dropped).
     async fn cleanup_all_subnet_marks(&self) {
-        let subnets: Vec<Ipv4Net> = {
-            if let Ok(mut guard) = self.added_subnets.lock() {
-                std::mem::take(&mut *guard)
-            } else {
-                Vec::new()
-            }
-        };
+        let mark = self.fwmark_hex();
+
+        // Dynamically discover all subnets that have rules for our fwmark
+        let subnets = find_subnets_for_mark(&mark).await;
+
+        if subnets.is_empty() {
+            debug!("No iptables rules found for mark {} in {}", mark, SNX_CHAIN);
+        } else {
+            debug!(
+                "Cleaning up {} iptables rule(s) for mark {} in {}",
+                subnets.len(),
+                mark,
+                SNX_CHAIN
+            );
+        }
 
         for subnet in subnets {
             self.remove_mark_for_subnet(subnet).await;
         }
+
+        // Try to cleanup empty chain
+        maybe_cleanup_empty_chain().await;
+    }
+
+    /// Add iptables mark rule for a subnet.
+    /// If a more specific rule from another VPN exists, skips adding (traffic will use the more specific route).
+    /// If our rule is more specific, removes the less specific rules from other VPNs.
+    async fn add_mark_for_subnet(&self, subnet: Ipv4Net) -> anyhow::Result<()> {
+        let mark = self.fwmark_hex();
+        let subnet_str = subnet.to_string();
+        let prefix_len = subnet.prefix_len();
+
+        // Ensure shared chain exists
+        ensure_snx_chain_exists().await;
+
+        // Skip if rule already exists
+        if mark_rule_exists(&subnet_str, &mark).await {
+            debug!(
+                "iptables rule already exists in {}: -d {} --set-mark {}",
+                SNX_CHAIN, subnet_str, mark
+            );
+            return Ok(());
+        }
+
+        // Check for exact duplicate subnet from another VPN
+        if check_exact_duplicate_rule(subnet, &mark).await {
+            // Exact same subnet exists from another VPN - skip adding duplicate
+            return Ok(());
+        }
+
+        // Find correct position based on prefix specificity
+        let position = find_insert_position(prefix_len).await;
+
+        debug!(
+            "Adding iptables rule to {} at position {}: -d {} -j MARK --set-mark {}",
+            SNX_CHAIN, position, subnet_str, mark
+        );
+
+        // Insert MARK rule at calculated position
+        let mark_result = crate::util::run_command(
+            "iptables",
+            [
+                "-t",
+                "mangle",
+                "-I",
+                SNX_CHAIN,
+                &position.to_string(),
+                "-d",
+                &subnet_str,
+                "-j",
+                "MARK",
+                "--set-mark",
+                &mark,
+            ],
+        )
+        .await;
+
+        if let Err(e) = &mark_result {
+            warn!("Failed to add MARK rule for {} in {}: {}", subnet_str, SNX_CHAIN, e);
+        }
+
+        // Insert RETURN rule immediately after MARK (position + 1)
+        let return_result = crate::util::run_command(
+            "iptables",
+            [
+                "-t",
+                "mangle",
+                "-I",
+                SNX_CHAIN,
+                &(position + 1).to_string(),
+                "-d",
+                &subnet_str,
+                "-m",
+                "mark",
+                "--mark",
+                &mark,
+                "-j",
+                "RETURN",
+            ],
+        )
+        .await;
+
+        if let Err(e) = &return_result {
+            warn!("Failed to add RETURN rule for {} in {}: {}", subnet_str, SNX_CHAIN, e);
+        }
+
+        Ok(())
     }
 }
 
@@ -310,8 +566,10 @@ impl RoutingConfigurator for LinuxRoutingConfigurator {
             let _ = self.add_route_to_table(**route).await;
 
             // Add iptables rule to mark packets destined to this subnet
-            if let Err(e) = self.add_mark_for_subnet(**route).await {
-                warn!("Failed to add mark for subnet {}: {}", route, e);
+            // If there's a conflict with a more specific rule from another VPN,
+            // the rule is skipped. Use "Additional routes" with /32 to override.
+            if self.add_mark_for_subnet(**route).await.is_err() {
+                warn!("Failed to add mark for subnet {}", route);
             }
         }
 
