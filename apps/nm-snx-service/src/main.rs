@@ -21,6 +21,10 @@ const NM_VPN_SERVICE_STATE_STARTING: u32 = 3;
 const NM_VPN_SERVICE_STATE_STARTED: u32 = 4;
 const NM_VPN_SERVICE_STATE_STOPPED: u32 = 6;
 
+// NetworkManager VPN Plugin Failure reasons
+const NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED: u32 = 0;
+const NM_VPN_PLUGIN_FAILURE_CONNECT_FAILED: u32 = 1;
+
 struct VpnHandle {
     command_sender: mpsc::Sender<TunnelCommand>,
     /// Sender to forward events to connector for rekey processing
@@ -34,6 +38,8 @@ struct InternalState {
     dbus_connection: Option<zbus::Connection>,
     /// Pending authentication when waiting for secrets
     pending_auth: Option<PendingAuth>,
+    /// Channel to signal main loop to shutdown after failure
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 struct PendingAuth {
@@ -56,7 +62,34 @@ impl VpnPlugin {
                 vpn_handle: None,
                 dbus_connection: None,
                 pending_auth: None,
+                shutdown_tx: None,
             })),
+        }
+    }
+
+    /// Signal failure to NetworkManager and trigger process shutdown.
+    /// This emits the Failure signal, StateChanged(STOPPED), and signals the main loop to exit.
+    async fn signal_failure_and_shutdown(&self, ctx: &SignalEmitter<'_>, reason: u32) {
+        warn!("Signaling connection failure (reason={}), will shutdown", reason);
+        let _ = VpnPlugin::failure(ctx, reason).await;
+        let _ = VpnPlugin::vpn_state_changed(ctx, NM_VPN_SERVICE_STATE_STOPPED).await;
+
+        // Signal main loop to exit
+        self.trigger_shutdown().await;
+    }
+
+    /// Trigger process shutdown by signaling the main loop to exit.
+    async fn trigger_shutdown(&self) {
+        warn!("trigger_shutdown() called");
+        let mut inner = self.inner.lock().await;
+        if let Some(tx) = inner.shutdown_tx.take() {
+            warn!("Triggering process shutdown - sending to channel");
+            match tx.send(()) {
+                Ok(_) => warn!("Shutdown signal sent successfully"),
+                Err(_) => error!("Failed to send shutdown signal - receiver dropped"),
+            }
+        } else {
+            error!("trigger_shutdown() called but shutdown_tx is None!");
         }
     }
 }
@@ -82,9 +115,19 @@ impl VpnPlugin {
     #[zbus(signal, name = "Ip4Config")]
     async fn ip4_config_signal(ctx: &SignalEmitter<'_>, config: HashMap<&str, Value<'_>>) -> zbus::Result<()>;
 
+    /// Failure signal - indicates connection failure with reason code
+    #[zbus(signal, name = "Failure")]
+    async fn failure(ctx: &SignalEmitter<'_>, reason: u32) -> zbus::Result<()>;
+
     async fn connect(&self, connection: HashMap<String, HashMap<String, zvariant::OwnedValue>>) -> fdo::Result<()> {
         info!("Connect request received");
-        self.do_connect(connection, false).await
+        let result = self.do_connect(connection, false).await;
+        if let Err(ref e) = result {
+            // Signal shutdown on any connection error
+            warn!("Connect failed with error: {:?}, triggering shutdown", e);
+            self.trigger_shutdown().await;
+        }
+        result
     }
 
     async fn connect_interactive(
@@ -93,7 +136,13 @@ impl VpnPlugin {
         _details: HashMap<String, zvariant::OwnedValue>,
     ) -> fdo::Result<()> {
         info!("ConnectInteractive request received");
-        self.do_connect(connection, true).await
+        let result = self.do_connect(connection, true).await;
+        if let Err(ref e) = result {
+            // Signal shutdown on any connection error
+            warn!("ConnectInteractive failed with error: {:?}, triggering shutdown", e);
+            self.trigger_shutdown().await;
+        }
+        result
     }
 
     async fn disconnect(&self) -> fdo::Result<()> {
@@ -102,21 +151,27 @@ impl VpnPlugin {
         // Log a backtrace-like info to see who's calling
         debug!("Disconnect called - dumping state");
 
-        let mut inner = self.inner.lock().await;
+        {
+            let mut inner = self.inner.lock().await;
 
-        // Clear pending auth
-        if inner.pending_auth.is_some() {
-            info!("Clearing pending authentication");
-            inner.pending_auth = None;
+            // Clear pending auth
+            if inner.pending_auth.is_some() {
+                info!("Clearing pending authentication");
+                inner.pending_auth = None;
+            }
+
+            // Disconnect tunnel
+            if let Some(handle) = inner.vpn_handle.take() {
+                info!("Sending termination command to tunnel");
+                let _ = handle.command_sender.send(TunnelCommand::Terminate(true)).await;
+            } else {
+                warn!("Disconnect called but no active VPN session");
+            }
         }
 
-        // Disconnect tunnel
-        if let Some(handle) = inner.vpn_handle.take() {
-            info!("Sending termination command to tunnel");
-            let _ = handle.command_sender.send(TunnelCommand::Terminate(true)).await;
-        } else {
-            warn!("Disconnect called but no active VPN session");
-        }
+        // Trigger process shutdown - NetworkManager expects the service to exit after disconnect
+        info!("Disconnect complete, triggering process shutdown");
+        self.trigger_shutdown().await;
 
         Ok(())
     }
@@ -441,6 +496,8 @@ impl VpnPlugin {
                                             .await;
                                     }
                                 }
+                                self.signal_failure_and_shutdown(ctx, NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED)
+                                    .await;
                                 return Err(fdo::Error::Failed(format!("Password error: {}", e)));
                             }
                         }
@@ -459,6 +516,8 @@ impl VpnPlugin {
                                 )
                                 .await;
                         } else {
+                            self.signal_failure_and_shutdown(ctx, NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED)
+                                .await;
                             return Err(fdo::Error::Failed("Password required".into()));
                         }
                     } else if let Some(mfa) = &params.mfa_code {
@@ -484,6 +543,8 @@ impl VpnPlugin {
                                 let prompt = challenge_prompt.unwrap();
                                 return self.request_secrets(connector, session, params, ctx, &prompt).await;
                             } else {
+                                self.signal_failure_and_shutdown(ctx, NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED)
+                                    .await;
                                 return Err(fdo::Error::Failed("MFA rejected".into()));
                             }
                         } else {
@@ -493,6 +554,8 @@ impl VpnPlugin {
                                 let prompt = challenge_prompt.unwrap();
                                 return self.request_secrets(connector, session, params, ctx, &prompt).await;
                             } else {
+                                self.signal_failure_and_shutdown(ctx, NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED)
+                                    .await;
                                 return Err(fdo::Error::Failed("MFA required".into()));
                             }
                         }
@@ -503,6 +566,8 @@ impl VpnPlugin {
                             let prompt = challenge_prompt.unwrap();
                             return self.request_secrets(connector, session, params, ctx, &prompt).await;
                         } else {
+                            self.signal_failure_and_shutdown(ctx, NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED)
+                                .await;
                             return Err(fdo::Error::Failed("MFA required".into()));
                         }
                     }
@@ -817,10 +882,12 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Connected to D-Bus");
 
-    // Store D-Bus connection
+    // Create shutdown channel and store in plugin state
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     {
         let mut guard = inner.lock().await;
         guard.dbus_connection = Some(conn.clone());
+        guard.shutdown_tx = Some(shutdown_tx);
     }
 
     let iface_ref = conn
@@ -838,6 +905,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::select! {
         _ = sigterm.recv() => info!("SIGTERM"),
         _ = sigint.recv() => info!("SIGINT"),
+        _ = shutdown_rx => info!("Shutdown requested after connection failure"),
     }
 
     Ok(())

@@ -462,7 +462,9 @@ fn main() -> Result<()> {
         .secrets
         .get("username")
         .cloned()
-        .or_else(|| vpn_details.data.get("username").cloned());
+        .or_else(|| vpn_details.secrets.get("user-name").cloned())
+        .or_else(|| vpn_details.data.get("username").cloned())
+        .or_else(|| vpn_details.data.get("user-name").cloned());
     let stdin_password = vpn_details.secrets.get("password").cloned();
 
     log_debug!(

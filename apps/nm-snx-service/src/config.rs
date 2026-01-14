@@ -68,26 +68,42 @@ pub fn params_from_connection(connection: &HashMap<String, HashMap<String, Owned
     debug!("Connection UUID: {:?}, ID: {:?}", connection_uuid, connection_id);
 
     if let Some(vpn_settings) = connection.get("vpn") {
+        debug!("vpn_settings keys: {:?}", vpn_settings.keys().collect::<Vec<_>>());
+
         if let Some(data) = vpn_settings.get("data") {
+            debug!("Processing vpn.data: {:?}", data);
             extract_and_apply(data, &mut params)?;
+            debug!("After vpn.data: user_name={:?}", params.user_name);
         }
 
         if let Some(secrets) = vpn_settings.get("secrets") {
+            debug!("Processing vpn.secrets: {:?}", secrets);
             extract_and_apply(secrets, &mut params)?;
+            debug!("After vpn.secrets: user_name={:?}", params.user_name);
         }
 
         // Also check for top-level keys in the 'vpn' map (e.g. user-name)
+        // NetworkManager stores username in vpn.user-name property, not in vpn.data
         if let Some(username) = vpn_settings.get("user-name")
             && let Ok(s) = username.downcast_ref::<Str>()
         {
+            debug!("Found top-level 'user-name' in vpn: {}", s.as_str());
             params.user_name = s.as_str().to_string();
         }
         if let Some(username) = vpn_settings.get("username")
             && let Ok(s) = username.downcast_ref::<Str>()
         {
+            debug!("Found top-level 'username' in vpn: {}", s.as_str());
             params.user_name = s.as_str().to_string();
         }
     }
+
+    debug!(
+        "Final parsed params: user_name={:?}, server={:?}, password_len={}",
+        params.user_name,
+        params.server_name,
+        params.password.len()
+    );
 
     // Generate unique interface name if not explicitly set
     // Prefer connection name (e.g., "VPN Corp" → "snx-corp") over UUID
@@ -132,10 +148,17 @@ fn extract_and_apply(value: &OwnedValue, params: &mut TunnelParams) -> Result<()
 }
 
 fn apply_string_map(map: &HashMap<String, String>, params: &mut TunnelParams) -> Result<()> {
+    debug!(
+        "apply_string_map called with keys: {:?}",
+        map.keys().collect::<Vec<_>>()
+    );
     for (k, v) in map {
         match k.as_str() {
             "server" | "server-name" => params.server_name = v.clone(),
-            "username" | "user-name" => params.user_name = v.clone(),
+            "username" | "user-name" => {
+                debug!("Setting user_name from key '{}' to '{}'", k, v);
+                params.user_name = v.clone();
+            }
             "password" => params.password = v.clone(),
             "password-factor" => params.password_factor = v.parse().unwrap_or(1),
             "mfa_token" | "mfa-token" => params.mfa_code = Some(v.clone()),

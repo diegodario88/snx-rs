@@ -624,7 +624,11 @@ build_editor_widget(SnxEditor *editor, NMConnection *connection)
         s_vpn = nm_connection_get_setting_vpn(connection);
         if (s_vpn) {
             nm_server = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_SERVER);
-            nm_username = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_USERNAME);
+            /* Use the built-in user-name property, with fallback to data item */
+            nm_username = nm_setting_vpn_get_user_name(s_vpn);
+            if (!nm_username || !*nm_username) {
+                nm_username = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_USERNAME);
+            }
             nm_login_type = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_LOGIN_TYPE);
             nm_tunnel_type = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_TUNNEL_TYPE);
             nm_cert_type = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_CERT_TYPE);
@@ -894,12 +898,13 @@ snx_editor_update_connection(NMVpnEditor *iface, NMConnection *connection, GErro
     else
         nm_setting_vpn_remove_data_item(s_vpn, SNX_KEY_SERVER);
     
-    /* Username */
+    /* Username - use the NMSettingVpn's built-in user-name property */
     text = gtk_editable_get_text(GTK_EDITABLE(editor->username_entry));
-    if (text && *text)
-        nm_setting_vpn_add_data_item(s_vpn, SNX_KEY_USERNAME, text);
-    else
-        nm_setting_vpn_remove_data_item(s_vpn, SNX_KEY_USERNAME);
+    if (text && *text) {
+        g_object_set(G_OBJECT(s_vpn), NM_SETTING_VPN_USER_NAME, text, NULL);
+    } else {
+        g_object_set(G_OBJECT(s_vpn), NM_SETTING_VPN_USER_NAME, NULL, NULL);
+    }
     
     /* Login type (combo with entry) */
     text = get_combo_value(editor->login_type_combo);
