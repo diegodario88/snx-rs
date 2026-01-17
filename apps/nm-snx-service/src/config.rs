@@ -172,14 +172,12 @@ fn apply_string_map(map: &HashMap<String, String>, params: &mut TunnelParams) ->
                 params.ignore_dns_servers = v.split(',').flat_map(|s| s.trim().parse().ok()).collect()
             }
             "default-route" => params.default_route = v.parse().unwrap_or_default(),
-            "no-routing" => params.no_routing = v.parse().unwrap_or_default(),
             "add-routes" => {
                 params.add_routes = v.split(',').flat_map(|s| parse_ipv4_or_subnet(s.trim()).ok()).collect()
             }
             "ignore-routes" => {
                 params.ignore_routes = v.split(',').flat_map(|s| parse_ipv4_or_subnet(s.trim()).ok()).collect()
             }
-            "no-dns" => params.no_dns = v.parse().unwrap_or_default(),
             "ignore-server-cert" => params.ignore_server_cert = v.parse().unwrap_or_default(),
             "tunnel-type" => params.tunnel_type = v.parse().unwrap_or_default(),
             "ca-cert" => params.ca_cert = v.split(',').map(|s| s.trim().into()).collect(),
@@ -189,7 +187,6 @@ fn apply_string_map(map: &HashMap<String, String>, params: &mut TunnelParams) ->
             "cert-password" => params.cert_password = Some(v.clone()),
             "cert-id" => params.cert_id = Some(v.clone()),
             "if-name" => params.if_name = Some(v.clone()),
-            "no-keychain" => params.no_keychain = v.parse().unwrap_or_default(),
             "ike-lifetime" => {
                 params.ike_lifetime = v
                     .parse::<u64>()
@@ -199,7 +196,6 @@ fn apply_string_map(map: &HashMap<String, String>, params: &mut TunnelParams) ->
             "ike-persist" => params.ike_persist = v.parse().unwrap_or_default(),
             "no-keepalive" => params.no_keepalive = v.parse().unwrap_or_default(),
             "client-mode" => params.client_mode = v.clone(),
-            "set-routing-domains" => params.set_routing_domains = v.parse().unwrap_or_default(),
             "port-knock" => params.port_knock = v.parse().unwrap_or_default(),
             "ip-lease-time" => params.ip_lease_time = v.parse::<u64>().ok().map(Duration::from_secs),
             "disable-ipv6" => params.disable_ipv6 = v.parse().unwrap_or_default(),

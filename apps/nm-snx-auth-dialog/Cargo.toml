@@ -11,12 +11,4 @@ publish.workspace = true
 [dependencies]
 gtk4 = "0.10"
 libadwaita = "0.8"
-libnm = "0.2"
-getopt = "1.0"
-glib = "0.20"
 anyhow = "1"
-snxcore = { path = "../../crates/snxcore" }
-directories-next = "2.0"
-base64 = "0.22"
-tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
-secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
