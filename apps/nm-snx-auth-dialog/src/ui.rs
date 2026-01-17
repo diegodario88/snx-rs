@@ -79,30 +79,6 @@ impl MfaDialog {
         mfa_box.append(&mfa_label);
         mfa_box.append(&mfa_entry);
 
-        // Auto-format OTP as user types (e.g., 123456 -> 123-456)
-        mfa_entry.connect_changed(|entry| {
-            let text = entry.text().to_string();
-
-            // Extract only digits
-            let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
-
-            // Limit to 6 digits
-            let digits: String = digits.chars().take(6).collect();
-
-            // Format with separator after 3 digits
-            let formatted = if digits.len() > 3 {
-                format!("{}-{}", &digits[..3], &digits[3..])
-            } else {
-                digits
-            };
-
-            // Avoid infinite loop - only update if different
-            if text != formatted {
-                entry.set_text(&formatted);
-                entry.set_position(formatted.len() as i32);
-            }
-        });
-
         vbox.append(&mfa_box);
 
         // Action Buttons
@@ -117,10 +93,39 @@ impl MfaDialog {
         connect_button.add_css_class("suggested-action");
         connect_button.add_css_class("pill");
         connect_button.set_width_request(100);
+        connect_button.set_sensitive(false); // Disabled until OTP is complete
 
         hbox_buttons.append(&cancel_button);
         hbox_buttons.append(&connect_button);
         vbox.append(&hbox_buttons);
+
+        // Auto-format OTP as user types and enable/disable Connect button
+        let connect_button_clone = connect_button.clone();
+        mfa_entry.connect_changed(move |entry| {
+            let text = entry.text().to_string();
+
+            // Extract only digits
+            let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
+
+            // Limit to 6 digits
+            let digits: String = digits.chars().take(6).collect();
+
+            // Enable Connect button only when we have 6 digits
+            connect_button_clone.set_sensitive(digits.len() == 6);
+
+            // Format with separator after 3 digits
+            let formatted = if digits.len() > 3 {
+                format!("{}-{}", &digits[..3], &digits[3..])
+            } else {
+                digits
+            };
+
+            // Avoid infinite loop - only update if different
+            if text != formatted {
+                entry.set_text(&formatted);
+                entry.set_position(formatted.len() as i32);
+            }
+        });
 
         // Set default widget to Connect button
         window.set_default_widget(Some(&connect_button));

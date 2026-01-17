@@ -50,6 +50,27 @@ struct PendingAuth {
     pending_hint: String,
 }
 
+/// Extract password-flags from vpn.data settings.
+/// Returns 0 (NONE/system stored), 1 (AGENT_OWNED/keyring), 2 (NOT_SAVED/ask always), or 4 (NOT_REQUIRED).
+fn extract_password_flags(settings: &HashMap<String, HashMap<String, zvariant::OwnedValue>>) -> u32 {
+    if let Some(vpn) = settings.get("vpn") {
+        if let Some(data) = vpn.get("data") {
+            if let Ok(dict) = data.downcast_ref::<zvariant::Dict<'_, '_>>() {
+                for (k, v) in dict.iter() {
+                    if let Ok(key) = k.downcast_ref::<zvariant::Str>() {
+                        if key.as_str() == "password-flags" {
+                            if let Ok(val) = v.downcast_ref::<zvariant::Str>() {
+                                return val.as_str().parse().unwrap_or(0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    0
+}
+
 /// The D-Bus interface - only contains Arc<Mutex<InternalState>>
 struct VpnPlugin {
     inner: Arc<Mutex<InternalState>>,
@@ -208,7 +229,27 @@ impl VpnPlugin {
             return Ok("".to_string());
         }
 
-        // Try to get password from keychain (if no-keychain=false)
+        // Extract password-flags from vpn.data
+        // 0 = NONE (system stored), 1 = AGENT_OWNED (keyring), 2 = NOT_SAVED (ask always)
+        let password_flags = extract_password_flags(&settings);
+        debug!("NeedSecrets: password-flags={}", password_flags);
+
+        // If password-flags > 0 (agent-owned or not-saved) and password is not in secrets,
+        // we MUST tell NM we need secrets. This ensures the agent is called BEFORE
+        // ConnectInteractive, making MFA the only SecretsRequired signal during connection.
+        // This works around a GNOME Shell bug where the agent ignores a second GetSecrets
+        // request for the same connection attempt.
+        if password_flags > 0 {
+            info!(
+                "NeedSecrets: password-flags={}, no password in secrets, need secrets from agent",
+                password_flags
+            );
+            return Ok("vpn".to_string());
+        }
+
+        // For password-flags=0 (system stored), try to get password from our keychain
+        // (only relevant if no-keychain=false, but for system-stored passwords this
+        // path is rarely used since NM includes the password in settings)
         if !params.no_keychain {
             debug!("NeedSecrets: checking keychain for user '{}'", params.user_name);
             if Platform::get()
@@ -324,26 +365,15 @@ impl VpnPlugin {
                         .await
                 }
                 SessionState::PendingChallenge(_) => {
-                    let prompt = challenge_prompt.unwrap();
-                    info!("Still need secrets: {}", prompt);
-
-                    // Store pending auth again (always MFA at this point)
-                    {
-                        let mut inner = self.inner.lock().await;
-                        inner.pending_auth = Some(PendingAuth {
-                            connector: pending.connector,
-                            session: new_session,
-                            params: pending.params,
-                            pending_hint: "mfa_token".to_string(),
-                        });
-                    }
-
-                    // Emit signal again
-                    VpnPlugin::secrets_required(ctx, &prompt, vec!["mfa_token"])
-                        .await
-                        .map_err(|e| fdo::Error::Failed(format!("Signal error: {}", e)))?;
-
-                    Ok(())
+                    // Server sent another challenge after we submitted MFA code
+                    // This means the OTP was rejected. We can't request new secrets
+                    // because GNOME Shell won't process a second SecretsRequired.
+                    // Signal failure so NM shows error notification to user.
+                    let error_msg = challenge_prompt.unwrap_or_else(|| "MFA code rejected".to_string());
+                    warn!("MFA code rejected in NewSecrets: {}", error_msg);
+                    self.signal_failure_and_shutdown(ctx, NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED)
+                        .await;
+                    Err(fdo::Error::Failed(error_msg))
                 }
             }
         }
@@ -532,21 +562,38 @@ impl VpnPlugin {
                         if !mfa.is_empty() && !mfa_code_used && use_mfa_from_params {
                             info!("Submitting MFA code");
                             mfa_code_used = true;
-                            session = connector
-                                .challenge_code(session.clone(), mfa)
-                                .await
-                                .map_err(|e| fdo::Error::Failed(format!("MFA error: {}", e)))?;
-                        } else if mfa_code_used {
-                            // MFA was already used and rejected
-                            if interactive {
-                                info!("MFA rejected, requesting new secrets");
-                                let prompt = challenge_prompt.unwrap();
-                                return self.request_secrets(connector, session, params, ctx, &prompt).await;
-                            } else {
-                                self.signal_failure_and_shutdown(ctx, NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED)
-                                    .await;
-                                return Err(fdo::Error::Failed("MFA rejected".into()));
+                            match connector.challenge_code(session.clone(), mfa).await {
+                                Ok(new_session) => {
+                                    session = new_session;
+                                }
+                                Err(e) => {
+                                    let err_msg = e.to_string();
+                                    warn!("MFA authentication failed: {}", err_msg);
+
+                                    if interactive {
+                                        // Request new MFA code via UI
+                                        info!("MFA code rejected, requesting new code via UI");
+                                        let prompt = challenge_prompt.unwrap_or_else(|| {
+                                            "Code incorrect. Please enter a new OTP code:".to_string()
+                                        });
+                                        return self.request_secrets(connector, session, params, ctx, &prompt).await;
+                                    } else {
+                                        self.signal_failure_and_shutdown(ctx, NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED)
+                                            .await;
+                                        return Err(fdo::Error::Failed(format!("MFA error: {}", e)));
+                                    }
+                                }
                             }
+                        } else if mfa_code_used {
+                            // MFA was already used and server sent another challenge
+                            // This means the OTP was rejected. We can't request new secrets
+                            // because GNOME Shell won't process a second SecretsRequired.
+                            // Signal failure so NM shows error notification to user.
+                            let error_msg = challenge_prompt.unwrap_or_else(|| "MFA code rejected".to_string());
+                            warn!("MFA code rejected: {}", error_msg);
+                            self.signal_failure_and_shutdown(ctx, NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED)
+                                .await;
+                            return Err(fdo::Error::Failed(error_msg));
                         } else {
                             // MFA code is empty, stale, or not allowed - need to request fresh one
                             if interactive {
