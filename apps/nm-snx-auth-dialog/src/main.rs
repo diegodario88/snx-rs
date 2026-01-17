@@ -362,12 +362,17 @@ fn run_mfa_ui(connection_name: &str, prompt: &str) -> Result<String> {
         let dialog = ui::MfaDialog::new(app, &name, &prompt);
         let tx = tx.clone();
 
-        // Handle Cancel
+        // Handle window close (X button)
+        dialog.window.connect_close_request(move |_| {
+            log_debug!("[auth-dialog] Window closed by user (X button)");
+            process::exit(1);
+        });
+
+        // Handle Cancel button
         let window_clone = dialog.window.clone();
         dialog.cancel_button.connect_clicked(move |_| {
             log_debug!("[auth-dialog] User cancelled");
             window_clone.close();
-            process::exit(1);
         });
 
         // Handle Connect
