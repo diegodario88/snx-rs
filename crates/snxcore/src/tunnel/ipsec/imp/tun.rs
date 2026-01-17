@@ -109,6 +109,10 @@ impl TunIpsecTunnel {
         {
             let platform = Platform::get();
             let configurator = platform.new_routing_configurator(device.name(), session.address);
+
+            // Clean up policy routing rules and VPN-specific routing table
+            let _ = configurator.remove_routes().await;
+
             let _ = configurator
                 .remove_default_route(self.gateway_address, self.params.disable_ipv6)
                 .await;

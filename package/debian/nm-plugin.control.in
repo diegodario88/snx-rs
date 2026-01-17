@@ -1,0 +1,20 @@
+Package: networkmanager-snx
+Version: {{version}}
+Section: net
+Priority: optional
+Installed-Size: {{size}}
+Architecture: {{arch}}
+Depends: network-manager (>= 1.40), libc6 (>= 2.35), libgtk-4-1 (>= 4.6), libadwaita-1-0 (>= 1.1)
+Maintainer: Dmitry Pankratov <dmitry@pankratov.net>
+Homepage: https://github.com/ancwrd1/snx-rs
+Description: Check Point SNX VPN plugin for NetworkManager
+ This package provides NetworkManager integration for Check Point SNX VPN.
+ It allows connecting to Check Point VPN servers directly from
+ GNOME Settings, COSMIC Settings, or any NetworkManager-compatible
+ network configuration tool.
+ .
+ Features:
+  - Full NetworkManager integration
+  - Support for multiple simultaneous VPN connections
+  - IPSec and SSL VPN tunnel support
+  - Multi-factor authentication (MFA/OTP) support

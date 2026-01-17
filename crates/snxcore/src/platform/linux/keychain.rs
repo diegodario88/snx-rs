@@ -17,10 +17,13 @@ impl SecretServiceKeychain {
 
 #[async_trait::async_trait]
 impl Keychain for SecretServiceKeychain {
-    async fn acquire_password(&self, username: &str) -> anyhow::Result<String> {
-        let props = HashMap::from([("snx-rs.username", username)]);
+    async fn acquire_password(&self, server: &str, username: &str) -> anyhow::Result<String> {
+        let props = HashMap::from([("snx-rs.server", server), ("snx-rs.username", username)]);
 
-        debug!("Attempting to acquire password from the keychain");
+        debug!(
+            "Attempting to acquire password from the keychain for {}@{}",
+            username, server
+        );
 
         let ss = SecretService::connect(EncryptionType::Dh).await?;
         let collection = ss.get_default_collection().await?;
@@ -35,13 +38,13 @@ impl Keychain for SecretServiceKeychain {
 
         let secret = item.get_secret().await?;
 
-        debug!("Password acquired successfully");
+        debug!("Password acquired successfully for {}@{}", username, server);
 
         Ok(String::from_utf8_lossy(&secret).into_owned())
     }
 
-    async fn store_password(&self, username: &str, password: &str) -> anyhow::Result<()> {
-        let props = HashMap::from([("snx-rs.username", username)]);
+    async fn store_password(&self, server: &str, username: &str, password: &str) -> anyhow::Result<()> {
+        let props = HashMap::from([("snx-rs.server", server), ("snx-rs.username", username)]);
 
         let ss = SecretService::connect(EncryptionType::Dh).await?;
         let collection = ss.get_default_collection().await?;
@@ -51,11 +54,14 @@ impl Keychain for SecretServiceKeychain {
             let _ = collection.unlock().await;
         }
 
-        debug!("Attempting to store user password in the keychain");
+        debug!(
+            "Attempting to store user password in the keychain for {}@{}",
+            username, server
+        );
 
         collection
             .create_item(
-                &format!("snx-rs - {username}"),
+                &format!("snx-rs - {username}@{server}"),
                 props,
                 password.as_bytes(),
                 true,

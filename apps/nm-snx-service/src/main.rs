@@ -21,11 +21,15 @@ const NM_VPN_SERVICE_STATE_STARTING: u32 = 3;
 const NM_VPN_SERVICE_STATE_STARTED: u32 = 4;
 const NM_VPN_SERVICE_STATE_STOPPED: u32 = 6;
 
+// NetworkManager VPN Plugin Failure reasons
+const NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED: u32 = 0;
+const NM_VPN_PLUGIN_FAILURE_CONNECT_FAILED: u32 = 1;
+
 struct VpnHandle {
     command_sender: mpsc::Sender<TunnelCommand>,
-    /// Keep the connector alive to prevent its Drop from terminating the tunnel
+    /// Sender to forward events to connector for rekey processing
     #[allow(dead_code)]
-    connector: Box<dyn TunnelConnector + Send>,
+    rekey_event_sender: mpsc::Sender<TunnelEvent>,
 }
 
 /// Internal state that's NOT part of the D-Bus interface
@@ -34,6 +38,8 @@ struct InternalState {
     dbus_connection: Option<zbus::Connection>,
     /// Pending authentication when waiting for secrets
     pending_auth: Option<PendingAuth>,
+    /// Channel to signal main loop to shutdown after failure
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 struct PendingAuth {
@@ -42,6 +48,27 @@ struct PendingAuth {
     params: TunnelParams,
     /// What secret we're waiting for: "password" or "mfa_token"
     pending_hint: String,
+}
+
+/// Extract password-flags from vpn.data settings.
+/// Returns 0 (NONE/system stored), 1 (AGENT_OWNED/keyring), 2 (NOT_SAVED/ask always), or 4 (NOT_REQUIRED).
+fn extract_password_flags(settings: &HashMap<String, HashMap<String, zvariant::OwnedValue>>) -> u32 {
+    if let Some(vpn) = settings.get("vpn") {
+        if let Some(data) = vpn.get("data") {
+            if let Ok(dict) = data.downcast_ref::<zvariant::Dict<'_, '_>>() {
+                for (k, v) in dict.iter() {
+                    if let Ok(key) = k.downcast_ref::<zvariant::Str>() {
+                        if key.as_str() == "password-flags" {
+                            if let Ok(val) = v.downcast_ref::<zvariant::Str>() {
+                                return val.as_str().parse().unwrap_or(0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    0
 }
 
 /// The D-Bus interface - only contains Arc<Mutex<InternalState>>
@@ -56,7 +83,34 @@ impl VpnPlugin {
                 vpn_handle: None,
                 dbus_connection: None,
                 pending_auth: None,
+                shutdown_tx: None,
             })),
+        }
+    }
+
+    /// Signal failure to NetworkManager and trigger process shutdown.
+    /// This emits the Failure signal, StateChanged(STOPPED), and signals the main loop to exit.
+    async fn signal_failure_and_shutdown(&self, ctx: &SignalEmitter<'_>, reason: u32) {
+        warn!("Signaling connection failure (reason={}), will shutdown", reason);
+        let _ = VpnPlugin::failure(ctx, reason).await;
+        let _ = VpnPlugin::vpn_state_changed(ctx, NM_VPN_SERVICE_STATE_STOPPED).await;
+
+        // Signal main loop to exit
+        self.trigger_shutdown().await;
+    }
+
+    /// Trigger process shutdown by signaling the main loop to exit.
+    async fn trigger_shutdown(&self) {
+        warn!("trigger_shutdown() called");
+        let mut inner = self.inner.lock().await;
+        if let Some(tx) = inner.shutdown_tx.take() {
+            warn!("Triggering process shutdown - sending to channel");
+            match tx.send(()) {
+                Ok(_) => warn!("Shutdown signal sent successfully"),
+                Err(_) => error!("Failed to send shutdown signal - receiver dropped"),
+            }
+        } else {
+            error!("trigger_shutdown() called but shutdown_tx is None!");
         }
     }
 }
@@ -82,9 +136,19 @@ impl VpnPlugin {
     #[zbus(signal, name = "Ip4Config")]
     async fn ip4_config_signal(ctx: &SignalEmitter<'_>, config: HashMap<&str, Value<'_>>) -> zbus::Result<()>;
 
+    /// Failure signal - indicates connection failure with reason code
+    #[zbus(signal, name = "Failure")]
+    async fn failure(ctx: &SignalEmitter<'_>, reason: u32) -> zbus::Result<()>;
+
     async fn connect(&self, connection: HashMap<String, HashMap<String, zvariant::OwnedValue>>) -> fdo::Result<()> {
         info!("Connect request received");
-        self.do_connect(connection, false).await
+        let result = self.do_connect(connection, false).await;
+        if let Err(ref e) = result {
+            // Signal shutdown on any connection error
+            warn!("Connect failed with error: {:?}, triggering shutdown", e);
+            self.trigger_shutdown().await;
+        }
+        result
     }
 
     async fn connect_interactive(
@@ -93,7 +157,13 @@ impl VpnPlugin {
         _details: HashMap<String, zvariant::OwnedValue>,
     ) -> fdo::Result<()> {
         info!("ConnectInteractive request received");
-        self.do_connect(connection, true).await
+        let result = self.do_connect(connection, true).await;
+        if let Err(ref e) = result {
+            // Signal shutdown on any connection error
+            warn!("ConnectInteractive failed with error: {:?}, triggering shutdown", e);
+            self.trigger_shutdown().await;
+        }
+        result
     }
 
     async fn disconnect(&self) -> fdo::Result<()> {
@@ -102,21 +172,27 @@ impl VpnPlugin {
         // Log a backtrace-like info to see who's calling
         debug!("Disconnect called - dumping state");
 
-        let mut inner = self.inner.lock().await;
+        {
+            let mut inner = self.inner.lock().await;
 
-        // Clear pending auth
-        if inner.pending_auth.is_some() {
-            info!("Clearing pending authentication");
-            inner.pending_auth = None;
+            // Clear pending auth
+            if inner.pending_auth.is_some() {
+                info!("Clearing pending authentication");
+                inner.pending_auth = None;
+            }
+
+            // Disconnect tunnel
+            if let Some(handle) = inner.vpn_handle.take() {
+                info!("Sending termination command to tunnel");
+                let _ = handle.command_sender.send(TunnelCommand::Terminate(true)).await;
+            } else {
+                warn!("Disconnect called but no active VPN session");
+            }
         }
 
-        // Disconnect tunnel
-        if let Some(handle) = inner.vpn_handle.take() {
-            info!("Sending termination command to tunnel");
-            let _ = handle.command_sender.send(TunnelCommand::Terminate(true)).await;
-        } else {
-            warn!("Disconnect called but no active VPN session");
-        }
+        // Trigger process shutdown - NetworkManager expects the service to exit after disconnect
+        info!("Disconnect complete, triggering process shutdown");
+        self.trigger_shutdown().await;
 
         Ok(())
     }
@@ -153,12 +229,32 @@ impl VpnPlugin {
             return Ok("".to_string());
         }
 
-        // Try to get password from keychain (if no-keychain=false)
+        // Extract password-flags from vpn.data
+        // 0 = NONE (system stored), 1 = AGENT_OWNED (keyring), 2 = NOT_SAVED (ask always)
+        let password_flags = extract_password_flags(&settings);
+        debug!("NeedSecrets: password-flags={}", password_flags);
+
+        // If password-flags > 0 (agent-owned or not-saved) and password is not in secrets,
+        // we MUST tell NM we need secrets. This ensures the agent is called BEFORE
+        // ConnectInteractive, making MFA the only SecretsRequired signal during connection.
+        // This works around a GNOME Shell bug where the agent ignores a second GetSecrets
+        // request for the same connection attempt.
+        if password_flags > 0 {
+            info!(
+                "NeedSecrets: password-flags={}, no password in secrets, need secrets from agent",
+                password_flags
+            );
+            return Ok("vpn".to_string());
+        }
+
+        // For password-flags=0 (system stored), try to get password from our keychain
+        // (only relevant if no-keychain=false, but for system-stored passwords this
+        // path is rarely used since NM includes the password in settings)
         if !params.no_keychain {
             debug!("NeedSecrets: checking keychain for user '{}'", params.user_name);
             if Platform::get()
                 .new_keychain()
-                .acquire_password(&params.user_name)
+                .acquire_password(&params.server_name, &params.user_name)
                 .await
                 .is_ok()
             {
@@ -269,26 +365,15 @@ impl VpnPlugin {
                         .await
                 }
                 SessionState::PendingChallenge(_) => {
-                    let prompt = challenge_prompt.unwrap();
-                    info!("Still need secrets: {}", prompt);
-
-                    // Store pending auth again (always MFA at this point)
-                    {
-                        let mut inner = self.inner.lock().await;
-                        inner.pending_auth = Some(PendingAuth {
-                            connector: pending.connector,
-                            session: new_session,
-                            params: pending.params,
-                            pending_hint: "mfa_token".to_string(),
-                        });
-                    }
-
-                    // Emit signal again
-                    VpnPlugin::secrets_required(ctx, &prompt, vec!["mfa_token"])
-                        .await
-                        .map_err(|e| fdo::Error::Failed(format!("Signal error: {}", e)))?;
-
-                    Ok(())
+                    // Server sent another challenge after we submitted MFA code
+                    // This means the OTP was rejected. We can't request new secrets
+                    // because GNOME Shell won't process a second SecretsRequired.
+                    // Signal failure so NM shows error notification to user.
+                    let error_msg = challenge_prompt.unwrap_or_else(|| "MFA code rejected".to_string());
+                    warn!("MFA code rejected in NewSecrets: {}", error_msg);
+                    self.signal_failure_and_shutdown(ctx, NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED)
+                        .await;
+                    Err(fdo::Error::Failed(error_msg))
                 }
             }
         }
@@ -326,7 +411,11 @@ impl VpnPlugin {
                 "Attempting to fetch password from keychain for user '{}'",
                 params.user_name
             );
-            match Platform::get().new_keychain().acquire_password(&params.user_name).await {
+            match Platform::get()
+                .new_keychain()
+                .acquire_password(&params.server_name, &params.user_name)
+                .await
+            {
                 Ok(password) => {
                     info!("Password retrieved from keychain");
                     params.password = password;
@@ -437,6 +526,8 @@ impl VpnPlugin {
                                             .await;
                                     }
                                 }
+                                self.signal_failure_and_shutdown(ctx, NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED)
+                                    .await;
                                 return Err(fdo::Error::Failed(format!("Password error: {}", e)));
                             }
                         }
@@ -455,6 +546,8 @@ impl VpnPlugin {
                                 )
                                 .await;
                         } else {
+                            self.signal_failure_and_shutdown(ctx, NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED)
+                                .await;
                             return Err(fdo::Error::Failed("Password required".into()));
                         }
                     } else if let Some(mfa) = &params.mfa_code {
@@ -469,19 +562,38 @@ impl VpnPlugin {
                         if !mfa.is_empty() && !mfa_code_used && use_mfa_from_params {
                             info!("Submitting MFA code");
                             mfa_code_used = true;
-                            session = connector
-                                .challenge_code(session.clone(), mfa)
-                                .await
-                                .map_err(|e| fdo::Error::Failed(format!("MFA error: {}", e)))?;
-                        } else if mfa_code_used {
-                            // MFA was already used and rejected
-                            if interactive {
-                                info!("MFA rejected, requesting new secrets");
-                                let prompt = challenge_prompt.unwrap();
-                                return self.request_secrets(connector, session, params, ctx, &prompt).await;
-                            } else {
-                                return Err(fdo::Error::Failed("MFA rejected".into()));
+                            match connector.challenge_code(session.clone(), mfa).await {
+                                Ok(new_session) => {
+                                    session = new_session;
+                                }
+                                Err(e) => {
+                                    let err_msg = e.to_string();
+                                    warn!("MFA authentication failed: {}", err_msg);
+
+                                    if interactive {
+                                        // Request new MFA code via UI
+                                        info!("MFA code rejected, requesting new code via UI");
+                                        let prompt = challenge_prompt.unwrap_or_else(|| {
+                                            "Code incorrect. Please enter a new OTP code:".to_string()
+                                        });
+                                        return self.request_secrets(connector, session, params, ctx, &prompt).await;
+                                    } else {
+                                        self.signal_failure_and_shutdown(ctx, NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED)
+                                            .await;
+                                        return Err(fdo::Error::Failed(format!("MFA error: {}", e)));
+                                    }
+                                }
                             }
+                        } else if mfa_code_used {
+                            // MFA was already used and server sent another challenge
+                            // This means the OTP was rejected. We can't request new secrets
+                            // because GNOME Shell won't process a second SecretsRequired.
+                            // Signal failure so NM shows error notification to user.
+                            let error_msg = challenge_prompt.unwrap_or_else(|| "MFA code rejected".to_string());
+                            warn!("MFA code rejected: {}", error_msg);
+                            self.signal_failure_and_shutdown(ctx, NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED)
+                                .await;
+                            return Err(fdo::Error::Failed(error_msg));
                         } else {
                             // MFA code is empty, stale, or not allowed - need to request fresh one
                             if interactive {
@@ -489,6 +601,8 @@ impl VpnPlugin {
                                 let prompt = challenge_prompt.unwrap();
                                 return self.request_secrets(connector, session, params, ctx, &prompt).await;
                             } else {
+                                self.signal_failure_and_shutdown(ctx, NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED)
+                                    .await;
                                 return Err(fdo::Error::Failed("MFA required".into()));
                             }
                         }
@@ -499,6 +613,8 @@ impl VpnPlugin {
                             let prompt = challenge_prompt.unwrap();
                             return self.request_secrets(connector, session, params, ctx, &prompt).await;
                         } else {
+                            self.signal_failure_and_shutdown(ctx, NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED)
+                                .await;
                             return Err(fdo::Error::Failed("MFA required".into()));
                         }
                     }
@@ -587,6 +703,7 @@ impl VpnPlugin {
 
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let (evt_tx, mut evt_rx) = mpsc::channel(32);
+        let (rekey_tx, mut rekey_rx) = mpsc::channel::<TunnelEvent>(32);
 
         let tunnel = connector
             .create_tunnel(session, cmd_tx.clone())
@@ -599,6 +716,20 @@ impl VpnPlugin {
                 error!("Tunnel error: {}", e);
             }
         });
+
+        // Spawn connector event handler for rekey processing
+        // The connector needs to process RekeyCheck events to refresh the IPSec SA
+        tokio::spawn(async move {
+            while let Some(event) = rekey_rx.recv().await {
+                if let Err(e) = connector.handle_tunnel_event(event).await {
+                    error!("Connector rekey error: {}", e);
+                    break;
+                }
+            }
+        });
+
+        // Clone rekey_tx for the event handler
+        let rekey_tx_clone = rekey_tx.clone();
 
         // Spawn event handler
         let conn_clone = conn.clone();
@@ -724,18 +855,29 @@ impl VpnPlugin {
                         info!("Tunnel disconnected");
                         let _ = VpnPlugin::vpn_state_changed(ctx, NM_VPN_SERVICE_STATE_STOPPED).await;
                     }
-                    _ => {}
+                    TunnelEvent::RekeyCheck => {
+                        // Forward to connector for SA refresh
+                        let _ = rekey_tx_clone.send(TunnelEvent::RekeyCheck).await;
+                    }
+                    TunnelEvent::Rekeyed(addr) => {
+                        info!("IPSec SA rekeyed successfully, address: {}", addr);
+                        let _ = rekey_tx_clone.send(TunnelEvent::Rekeyed(addr)).await;
+                    }
+                    TunnelEvent::RemoteControlData(data) => {
+                        // Forward ISAKMP data to connector for processing
+                        let _ = rekey_tx_clone.send(TunnelEvent::RemoteControlData(data)).await;
+                    }
                 }
             }
             let _ = VpnPlugin::vpn_state_changed(ctx, NM_VPN_SERVICE_STATE_STOPPED).await;
         });
 
-        // Store handle (including connector to keep it alive)
+        // Store handle
         {
             let mut inner = self.inner.lock().await;
             inner.vpn_handle = Some(VpnHandle {
                 command_sender: cmd_tx,
-                connector,
+                rekey_event_sender: rekey_tx,
             });
         }
 
@@ -787,10 +929,12 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Connected to D-Bus");
 
-    // Store D-Bus connection
+    // Create shutdown channel and store in plugin state
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     {
         let mut guard = inner.lock().await;
         guard.dbus_connection = Some(conn.clone());
+        guard.shutdown_tx = Some(shutdown_tx);
     }
 
     let iface_ref = conn
@@ -808,6 +952,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::select! {
         _ = sigterm.recv() => info!("SIGTERM"),
         _ = sigint.recv() => info!("SIGINT"),
+        _ = shutdown_rx => info!("Shutdown requested after connection failure"),
     }
 
     Ok(())

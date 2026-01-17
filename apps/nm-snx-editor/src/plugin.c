@@ -34,6 +34,8 @@ typedef struct {
     /* Entry widgets for VPN settings */
     GtkWidget *server_entry;
     GtkWidget *username_entry;
+    GtkWidget *password_entry;
+    GtkWidget *password_storage_combo;
     GtkWidget *login_type_combo;
     GtkWidget *tunnel_type_combo;
     GtkWidget *cert_type_combo;
@@ -42,9 +44,6 @@ typedef struct {
     GtkWidget *add_routes_entry;
     GtkWidget *ignore_routes_entry;
     GtkWidget *default_route_switch;
-    GtkWidget *no_routing_switch;
-    GtkWidget *no_dns_switch;
-    GtkWidget *no_keychain_switch;
     GtkWidget *ignore_server_cert_switch;
     GtkWidget *mtu_spin;
     GtkWidget *ike_lifetime_spin;
@@ -52,7 +51,6 @@ typedef struct {
     GtkWidget *no_keepalive_switch;
     GtkWidget *disable_ipv6_switch;
     GtkWidget *port_knock_switch;
-    GtkWidget *set_routing_domains_switch;
     GtkWidget *cert_path_entry;
     GtkWidget *cert_id_entry;
     GtkWidget *ca_cert_entry;
@@ -91,9 +89,7 @@ G_DEFINE_TYPE_WITH_CODE(SnxEditor, snx_editor, G_TYPE_OBJECT,
 #define SNX_KEY_ADD_ROUTES "add-routes"
 #define SNX_KEY_IGNORE_ROUTES "ignore-routes"
 #define SNX_KEY_DEFAULT_ROUTE "default-route"
-#define SNX_KEY_NO_ROUTING "no-routing"
-#define SNX_KEY_NO_DNS "no-dns"
-#define SNX_KEY_NO_KEYCHAIN "no-keychain"
+#define SNX_KEY_PASSWORD "password"
 #define SNX_KEY_IGNORE_SERVER_CERT "ignore-server-cert"
 #define SNX_KEY_MTU "mtu"
 #define SNX_KEY_IKE_LIFETIME "ike-lifetime"
@@ -101,7 +97,6 @@ G_DEFINE_TYPE_WITH_CODE(SnxEditor, snx_editor, G_TYPE_OBJECT,
 #define SNX_KEY_NO_KEEPALIVE "no-keepalive"
 #define SNX_KEY_DISABLE_IPV6 "disable-ipv6"
 #define SNX_KEY_PORT_KNOCK "port-knock"
-#define SNX_KEY_SET_ROUTING_DOMAINS "set-routing-domains"
 
 /* Default values (from TunnelParams) */
 #define DEFAULT_MTU 1350
@@ -125,9 +120,6 @@ typedef struct {
     char *add_routes;
     char *ignore_routes;
     gboolean default_route;
-    gboolean no_routing;
-    gboolean no_dns;
-    gboolean no_keychain;
     gboolean ignore_server_cert;
     int mtu;
     int ike_lifetime;
@@ -135,11 +127,7 @@ typedef struct {
     gboolean no_keepalive;
     gboolean disable_ipv6;
     gboolean port_knock;
-    gboolean set_routing_domains;
     gboolean has_default_route;
-    gboolean has_no_routing;
-    gboolean has_no_dns;
-    gboolean has_no_keychain;
     gboolean has_ignore_server_cert;
     gboolean has_mtu;
     gboolean has_ike_lifetime;
@@ -147,7 +135,6 @@ typedef struct {
     gboolean has_no_keepalive;
     gboolean has_disable_ipv6;
     gboolean has_port_knock;
-    gboolean has_set_routing_domains;
 } SnxConfigDefaults;
 
 static void
@@ -189,8 +176,6 @@ load_config_defaults(void)
     /* Set defaults from TunnelParams */
     cfg->mtu = DEFAULT_MTU;
     cfg->ike_lifetime = DEFAULT_IKE_LIFETIME;
-    cfg->no_keychain = TRUE;  /* default is true in TunnelParams */
-    cfg->has_no_keychain = TRUE;
     
     /* Try to read from config file */
     const char *home = g_get_home_dir();
@@ -254,15 +239,6 @@ load_config_defaults(void)
         } else if (g_strcmp0(key, "default-route") == 0) {
             cfg->default_route = parse_bool(value);
             cfg->has_default_route = TRUE;
-        } else if (g_strcmp0(key, "no-routing") == 0) {
-            cfg->no_routing = parse_bool(value);
-            cfg->has_no_routing = TRUE;
-        } else if (g_strcmp0(key, "no-dns") == 0) {
-            cfg->no_dns = parse_bool(value);
-            cfg->has_no_dns = TRUE;
-        } else if (g_strcmp0(key, "no-keychain") == 0) {
-            cfg->no_keychain = parse_bool(value);
-            cfg->has_no_keychain = TRUE;
         } else if (g_strcmp0(key, "ignore-server-cert") == 0) {
             cfg->ignore_server_cert = parse_bool(value);
             cfg->has_ignore_server_cert = TRUE;
@@ -284,9 +260,6 @@ load_config_defaults(void)
         } else if (g_strcmp0(key, "port-knock") == 0) {
             cfg->port_knock = parse_bool(value);
             cfg->has_port_knock = TRUE;
-        } else if (g_strcmp0(key, "set-routing-domains") == 0) {
-            cfg->set_routing_domains = parse_bool(value);
-            cfg->has_set_routing_domains = TRUE;
         }
     }
     
@@ -377,9 +350,28 @@ snx_editor_class_init(SnxEditorClass *klass)
     object_class->dispose = snx_editor_dispose;
 }
 
+/* Callback to emit "changed" signal when any widget is modified */
+static void
+on_widget_changed(GtkWidget *widget, gpointer user_data)
+{
+    (void)widget;
+    SnxEditor *editor = SNX_EDITOR(user_data);
+    g_signal_emit_by_name(editor, "changed");
+}
+
+/* Callback for switch notify::active */
+static void
+on_switch_changed(GObject *gobject, GParamSpec *pspec, gpointer user_data)
+{
+    (void)gobject;
+    (void)pspec;
+    SnxEditor *editor = SNX_EDITOR(user_data);
+    g_signal_emit_by_name(editor, "changed");
+}
+
 /* Helper: add a labeled entry row */
 static GtkWidget *
-create_entry_row(GtkWidget *list, const char *label_text, const char *value, GtkWidget **out_entry)
+create_entry_row(GtkWidget *list, const char *label_text, const char *value, GtkWidget **out_entry, SnxEditor *editor)
 {
     GtkWidget *row = gtk_list_box_row_new();
     gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), FALSE);
@@ -394,6 +386,10 @@ create_entry_row(GtkWidget *list, const char *label_text, const char *value, Gtk
     gtk_widget_set_hexpand(entry, TRUE);
     if (value && *value)
         gtk_editable_set_text(GTK_EDITABLE(entry), value);
+    
+    /* Connect changed signal */
+    if (editor)
+        g_signal_connect(entry, "changed", G_CALLBACK(on_widget_changed), editor);
     
     gtk_box_append(GTK_BOX(box), label);
     gtk_box_append(GTK_BOX(box), entry);
@@ -412,7 +408,7 @@ create_entry_row(GtkWidget *list, const char *label_text, const char *value, Gtk
 
 /* Helper: add a labeled switch row */
 static GtkWidget *
-create_switch_row(GtkWidget *list, const char *label_text, gboolean value, GtkWidget **out_switch)
+create_switch_row(GtkWidget *list, const char *label_text, gboolean value, GtkWidget **out_switch, SnxEditor *editor)
 {
     GtkWidget *row = gtk_list_box_row_new();
     gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), FALSE);
@@ -425,6 +421,10 @@ create_switch_row(GtkWidget *list, const char *label_text, gboolean value, GtkWi
     
     gtk_switch_set_active(GTK_SWITCH(switch_widget), value);
     gtk_widget_set_valign(switch_widget, GTK_ALIGN_CENTER);
+    
+    /* Connect notify::active signal for switches */
+    if (editor)
+        g_signal_connect(switch_widget, "notify::active", G_CALLBACK(on_switch_changed), editor);
     
     gtk_box_append(GTK_BOX(box), label);
     gtk_box_append(GTK_BOX(box), switch_widget);
@@ -445,7 +445,7 @@ create_switch_row(GtkWidget *list, const char *label_text, gboolean value, GtkWi
 static GtkWidget *
 create_combo_row(GtkWidget *list, const char *label_text, const char *value,
                  const char **options, const char **option_ids, int n_options,
-                 gboolean has_entry, GtkWidget **out_combo)
+                 gboolean has_entry, GtkWidget **out_combo, SnxEditor *editor)
 {
     GtkWidget *row = gtk_list_box_row_new();
     gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), FALSE);
@@ -483,6 +483,17 @@ create_combo_row(GtkWidget *list, const char *label_text, const char *value,
         gtk_combo_box_set_active(GTK_COMBO_BOX(combo), 0);
     }
     
+    /* Connect changed signal */
+    if (editor) {
+        g_signal_connect(combo, "changed", G_CALLBACK(on_widget_changed), editor);
+        /* Also connect to the entry inside if it has one */
+        if (has_entry) {
+            GtkWidget *entry = gtk_combo_box_get_child(GTK_COMBO_BOX(combo));
+            if (entry)
+                g_signal_connect(entry, "changed", G_CALLBACK(on_widget_changed), editor);
+        }
+    }
+    
     gtk_box_append(GTK_BOX(box), label);
     gtk_box_append(GTK_BOX(box), combo);
     
@@ -498,9 +509,71 @@ create_combo_row(GtkWidget *list, const char *label_text, const char *value,
     return row;
 }
 
+/* Helper: add a password entry row with storage options dropdown */
+static GtkWidget *
+create_password_row(GtkWidget *list, const char *label_text, const char *value,
+                   NMSettingSecretFlags flags,
+                   GtkWidget **out_entry, GtkWidget **out_storage_combo, 
+                   SnxEditor *editor)
+{
+    GtkWidget *row = gtk_list_box_row_new();
+    gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), FALSE);
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+    GtkWidget *label = gtk_label_new(label_text);
+    
+    /* Password entry - GTK4 has GtkPasswordEntry */
+    GtkWidget *entry = gtk_password_entry_new();
+    gtk_password_entry_set_show_peek_icon(GTK_PASSWORD_ENTRY(entry), TRUE);
+    
+    /* Storage options dropdown */
+    GtkWidget *storage_combo = gtk_combo_box_text_new();
+    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(storage_combo), "0", "Save for all users");
+    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(storage_combo), "1", "Save for this user");
+    
+    /* Set layout */
+    gtk_widget_set_halign(label, GTK_ALIGN_START);
+    gtk_widget_set_hexpand(label, FALSE);
+    gtk_widget_set_size_request(label, 180, -1);
+    gtk_widget_set_hexpand(entry, TRUE);
+    gtk_widget_set_hexpand(storage_combo, FALSE);
+    
+    /* Set password value */
+    if (value && *value)
+        gtk_editable_set_text(GTK_EDITABLE(entry), value);
+    
+    /* Set storage combo based on flags */
+    char flag_str[8];
+    snprintf(flag_str, sizeof(flag_str), "%u", (unsigned)flags);
+    if (!gtk_combo_box_set_active_id(GTK_COMBO_BOX(storage_combo), flag_str))
+        gtk_combo_box_set_active(GTK_COMBO_BOX(storage_combo), 1); /* Default: Save for this user */
+    
+    /* Connect signals */
+    if (editor) {
+        g_signal_connect(entry, "changed", G_CALLBACK(on_widget_changed), editor);
+        g_signal_connect(storage_combo, "changed", G_CALLBACK(on_widget_changed), editor);
+    }
+    
+    gtk_box_append(GTK_BOX(box), label);
+    gtk_box_append(GTK_BOX(box), entry);
+    gtk_box_append(GTK_BOX(box), storage_combo);
+    
+    /* Margins */
+    gtk_widget_set_margin_start(box, 12);
+    gtk_widget_set_margin_end(box, 12);
+    gtk_widget_set_margin_top(box, 6);
+    gtk_widget_set_margin_bottom(box, 6);
+    
+    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
+    gtk_list_box_append(GTK_LIST_BOX(list), row);
+    
+    if (out_entry) *out_entry = entry;
+    if (out_storage_combo) *out_storage_combo = storage_combo;
+    return row;
+}
+
 /* Helper: add a labeled spin button row */
 static GtkWidget *
-create_spin_row(GtkWidget *list, const char *label_text, int value, int min, int max, GtkWidget **out_spin)
+create_spin_row(GtkWidget *list, const char *label_text, int value, int min, int max, GtkWidget **out_spin, SnxEditor *editor)
 {
     GtkWidget *row = gtk_list_box_row_new();
     gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), FALSE);
@@ -509,10 +582,16 @@ create_spin_row(GtkWidget *list, const char *label_text, int value, int min, int
     GtkWidget *spin = gtk_spin_button_new_with_range(min, max, 1);
     
     gtk_widget_set_halign(label, GTK_ALIGN_START);
-    gtk_widget_set_hexpand(label, TRUE);
+    gtk_widget_set_hexpand(label, FALSE);
+    gtk_widget_set_size_request(label, 180, -1);
     
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(spin), value);
     gtk_widget_set_valign(spin, GTK_ALIGN_CENTER);
+    gtk_widget_set_hexpand(spin, TRUE);
+    
+    /* Connect value-changed signal */
+    if (editor)
+        g_signal_connect(spin, "value-changed", G_CALLBACK(on_widget_changed), editor);
     
     gtk_box_append(GTK_BOX(box), label);
     gtk_box_append(GTK_BOX(box), spin);
@@ -569,18 +648,24 @@ build_editor_widget(SnxEditor *editor, NMConnection *connection)
     const char *nm_search_domains = NULL, *nm_add_routes = NULL, *nm_ignore_routes = NULL;
     const char *nm_cert_path = NULL, *nm_cert_id = NULL, *nm_ca_cert = NULL;
     const char *nm_dns_servers = NULL, *nm_ignore_search_domains = NULL, *nm_ignore_dns_servers = NULL;
-    const char *nm_default_route = NULL, *nm_no_routing = NULL, *nm_no_dns = NULL;
-    const char *nm_no_keychain = NULL, *nm_ignore_server_cert = NULL;
+    const char *nm_default_route = NULL;
+    const char *nm_ignore_server_cert = NULL;
     const char *nm_mtu = NULL, *nm_ike_lifetime = NULL;
     const char *nm_ike_persist = NULL, *nm_no_keepalive = NULL;
-    const char *nm_disable_ipv6 = NULL, *nm_port_knock = NULL, *nm_set_routing_domains = NULL;
+    const char *nm_disable_ipv6 = NULL, *nm_port_knock = NULL;
+    const char *nm_password = NULL;
+    NMSettingSecretFlags password_flags = NM_SETTING_SECRET_FLAG_AGENT_OWNED;
     gboolean has_nm_values = FALSE;
     
     if (connection) {
         s_vpn = nm_connection_get_setting_vpn(connection);
         if (s_vpn) {
             nm_server = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_SERVER);
-            nm_username = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_USERNAME);
+            /* Use the built-in user-name property, with fallback to data item */
+            nm_username = nm_setting_vpn_get_user_name(s_vpn);
+            if (!nm_username || !*nm_username) {
+                nm_username = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_USERNAME);
+            }
             nm_login_type = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_LOGIN_TYPE);
             nm_tunnel_type = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_TUNNEL_TYPE);
             nm_cert_type = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_CERT_TYPE);
@@ -595,9 +680,6 @@ build_editor_widget(SnxEditor *editor, NMConnection *connection)
             nm_add_routes = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_ADD_ROUTES);
             nm_ignore_routes = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_IGNORE_ROUTES);
             nm_default_route = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_DEFAULT_ROUTE);
-            nm_no_routing = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_NO_ROUTING);
-            nm_no_dns = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_NO_DNS);
-            nm_no_keychain = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_NO_KEYCHAIN);
             nm_ignore_server_cert = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_IGNORE_SERVER_CERT);
             nm_mtu = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_MTU);
             nm_ike_lifetime = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_IKE_LIFETIME);
@@ -605,41 +687,93 @@ build_editor_widget(SnxEditor *editor, NMConnection *connection)
             nm_no_keepalive = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_NO_KEEPALIVE);
             nm_disable_ipv6 = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_DISABLE_IPV6);
             nm_port_knock = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_PORT_KNOCK);
-            nm_set_routing_domains = nm_setting_vpn_get_data_item(s_vpn, SNX_KEY_SET_ROUTING_DOMAINS);
+            /* Read password from secrets */
+            nm_password = nm_setting_vpn_get_secret(s_vpn, SNX_KEY_PASSWORD);
+            nm_setting_get_secret_flags(NM_SETTING(s_vpn), SNX_KEY_PASSWORD, &password_flags, NULL);
             has_nm_values = (nm_server != NULL);
         }
     }
     
-    /* Compute final values using priority: NM > .conf > default */
-    const char *server = get_string_value(nm_server, cfg->server_name, "");
-    const char *username = get_string_value(nm_username, cfg->user_name, "");
-    const char *login_type = get_string_value(nm_login_type, cfg->login_type, "");
-    const char *tunnel_type = get_string_value(nm_tunnel_type, cfg->tunnel_type, "ipsec");
-    const char *cert_type = get_string_value(nm_cert_type, cfg->cert_type, "none");
-    const char *cert_path = get_string_value(nm_cert_path, cfg->cert_path, "");
-    const char *cert_id = get_string_value(nm_cert_id, cfg->cert_id, "");
-    const char *ca_cert = get_string_value(nm_ca_cert, cfg->ca_cert, "");
-    const char *transport_type = get_string_value(nm_transport_type, cfg->transport_type, "auto");
-    const char *search_domains = get_string_value(nm_search_domains, cfg->search_domains, "");
-    const char *ignore_search_domains = get_string_value(nm_ignore_search_domains, cfg->ignore_search_domains, "");
-    const char *dns_servers = get_string_value(nm_dns_servers, cfg->dns_servers, "");
-    const char *ignore_dns_servers = get_string_value(nm_ignore_dns_servers, cfg->ignore_dns_servers, "");
-    const char *add_routes = get_string_value(nm_add_routes, cfg->add_routes, "");
-    const char *ignore_routes = get_string_value(nm_ignore_routes, cfg->ignore_routes, "");
+    /* Compute final values
+     * For NEW connections (no server set): use .conf as defaults for easy migration
+     * For EXISTING connections: only use NM values, don't pollute with .conf values
+     * This prevents settings from one VPN "leaking" into another
+     */
+    gboolean is_new_connection = !has_nm_values;
     
-    gboolean default_route = get_bool_value(nm_default_route, has_nm_values, cfg->default_route, cfg->has_default_route, FALSE);
-    gboolean no_routing = get_bool_value(nm_no_routing, has_nm_values, cfg->no_routing, cfg->has_no_routing, FALSE);
-    gboolean no_dns = get_bool_value(nm_no_dns, has_nm_values, cfg->no_dns, cfg->has_no_dns, FALSE);
-    gboolean no_keychain = get_bool_value(nm_no_keychain, has_nm_values, cfg->no_keychain, cfg->has_no_keychain, TRUE);
-    gboolean ignore_server_cert = get_bool_value(nm_ignore_server_cert, has_nm_values, cfg->ignore_server_cert, cfg->has_ignore_server_cert, FALSE);
-    gboolean ike_persist = get_bool_value(nm_ike_persist, has_nm_values, cfg->ike_persist, cfg->has_ike_persist, FALSE);
-    gboolean no_keepalive = get_bool_value(nm_no_keepalive, has_nm_values, cfg->no_keepalive, cfg->has_no_keepalive, FALSE);
-    gboolean disable_ipv6 = get_bool_value(nm_disable_ipv6, has_nm_values, cfg->disable_ipv6, cfg->has_disable_ipv6, FALSE);
-    gboolean port_knock = get_bool_value(nm_port_knock, has_nm_values, cfg->port_knock, cfg->has_port_knock, FALSE);
-    gboolean set_routing_domains = get_bool_value(nm_set_routing_domains, has_nm_values, cfg->set_routing_domains, cfg->has_set_routing_domains, FALSE);
+    const char *server, *username, *login_type, *tunnel_type, *cert_type;
+    const char *cert_path, *cert_id, *ca_cert, *transport_type;
+    const char *search_domains, *ignore_search_domains, *dns_servers, *ignore_dns_servers;
+    const char *add_routes, *ignore_routes;
+    const char *password;
+    NMSettingSecretFlags pw_flags;
+    gboolean default_route, ignore_server_cert;
+    gboolean ike_persist, no_keepalive, disable_ipv6, port_knock;
+    int mtu, ike_lifetime;
     
-    int mtu = get_int_value(nm_mtu, cfg->mtu, cfg->has_mtu, DEFAULT_MTU);
-    int ike_lifetime = get_int_value(nm_ike_lifetime, cfg->ike_lifetime, cfg->has_ike_lifetime, DEFAULT_IKE_LIFETIME);
+    if (is_new_connection) {
+        /* NEW connection: use .conf as defaults for migration from standalone snx-rs */
+        server = get_string_value(nm_server, cfg->server_name, "");
+        username = get_string_value(nm_username, cfg->user_name, "");
+        login_type = get_string_value(nm_login_type, cfg->login_type, "");
+        tunnel_type = get_string_value(nm_tunnel_type, cfg->tunnel_type, "ipsec");
+        cert_type = get_string_value(nm_cert_type, cfg->cert_type, "none");
+        cert_path = get_string_value(nm_cert_path, cfg->cert_path, "");
+        cert_id = get_string_value(nm_cert_id, cfg->cert_id, "");
+        ca_cert = get_string_value(nm_ca_cert, cfg->ca_cert, "");
+        transport_type = get_string_value(nm_transport_type, cfg->transport_type, "auto");
+        search_domains = get_string_value(nm_search_domains, cfg->search_domains, "");
+        ignore_search_domains = get_string_value(nm_ignore_search_domains, cfg->ignore_search_domains, "");
+        dns_servers = get_string_value(nm_dns_servers, cfg->dns_servers, "");
+        ignore_dns_servers = get_string_value(nm_ignore_dns_servers, cfg->ignore_dns_servers, "");
+        add_routes = get_string_value(nm_add_routes, cfg->add_routes, "");
+        ignore_routes = get_string_value(nm_ignore_routes, cfg->ignore_routes, "");
+        
+        default_route = get_bool_value(nm_default_route, has_nm_values, cfg->default_route, cfg->has_default_route, FALSE);
+        ignore_server_cert = get_bool_value(nm_ignore_server_cert, has_nm_values, cfg->ignore_server_cert, cfg->has_ignore_server_cert, FALSE);
+        ike_persist = get_bool_value(nm_ike_persist, has_nm_values, cfg->ike_persist, cfg->has_ike_persist, FALSE);
+        no_keepalive = get_bool_value(nm_no_keepalive, has_nm_values, cfg->no_keepalive, cfg->has_no_keepalive, FALSE);
+        disable_ipv6 = get_bool_value(nm_disable_ipv6, has_nm_values, cfg->disable_ipv6, cfg->has_disable_ipv6, FALSE);
+        port_knock = get_bool_value(nm_port_knock, has_nm_values, cfg->port_knock, cfg->has_port_knock, FALSE);
+        
+        mtu = get_int_value(nm_mtu, cfg->mtu, cfg->has_mtu, DEFAULT_MTU);
+        ike_lifetime = get_int_value(nm_ike_lifetime, cfg->ike_lifetime, cfg->has_ike_lifetime, DEFAULT_IKE_LIFETIME);
+        
+        /* Password - no config fallback, use NM value */
+        password = nm_password ? nm_password : "";
+        pw_flags = password_flags;
+    } else {
+        /* EXISTING connection: only use NM values, no .conf fallback */
+        server = nm_server ? nm_server : "";
+        username = nm_username ? nm_username : "";
+        login_type = nm_login_type ? nm_login_type : "";
+        tunnel_type = nm_tunnel_type ? nm_tunnel_type : "ipsec";
+        cert_type = nm_cert_type ? nm_cert_type : "none";
+        cert_path = nm_cert_path ? nm_cert_path : "";
+        cert_id = nm_cert_id ? nm_cert_id : "";
+        ca_cert = nm_ca_cert ? nm_ca_cert : "";
+        transport_type = nm_transport_type ? nm_transport_type : "auto";
+        search_domains = nm_search_domains ? nm_search_domains : "";
+        ignore_search_domains = nm_ignore_search_domains ? nm_ignore_search_domains : "";
+        dns_servers = nm_dns_servers ? nm_dns_servers : "";
+        ignore_dns_servers = nm_ignore_dns_servers ? nm_ignore_dns_servers : "";
+        add_routes = nm_add_routes ? nm_add_routes : "";
+        ignore_routes = nm_ignore_routes ? nm_ignore_routes : "";
+        
+        default_route = nm_default_route ? parse_bool(nm_default_route) : FALSE;
+        ignore_server_cert = nm_ignore_server_cert ? parse_bool(nm_ignore_server_cert) : FALSE;
+        ike_persist = nm_ike_persist ? parse_bool(nm_ike_persist) : FALSE;
+        no_keepalive = nm_no_keepalive ? parse_bool(nm_no_keepalive) : FALSE;
+        disable_ipv6 = nm_disable_ipv6 ? parse_bool(nm_disable_ipv6) : FALSE;
+        port_knock = nm_port_knock ? parse_bool(nm_port_knock) : FALSE;
+        
+        mtu = nm_mtu ? atoi(nm_mtu) : DEFAULT_MTU;
+        ike_lifetime = nm_ike_lifetime ? atoi(nm_ike_lifetime) : DEFAULT_IKE_LIFETIME;
+        
+        /* Password */
+        password = nm_password ? nm_password : "";
+        pw_flags = password_flags;
+    }
     
     /* Main container - no scroll, GNOME Settings provides its own */
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 18);
@@ -662,12 +796,14 @@ build_editor_widget(SnxEditor *editor, NMConnection *connection)
     
     /* === Server section === */
     CREATE_SECTION("Server", server_list);
-    create_entry_row(server_list, "Gateway", server, &editor->server_entry);
+    create_entry_row(server_list, "Gateway", server, &editor->server_entry, editor);
     gtk_box_append(GTK_BOX(box), server_list);
     
     /* === Authentication section === */
     CREATE_SECTION("Authentication", auth_list);
-    create_entry_row(auth_list, "Username", username, &editor->username_entry);
+    create_entry_row(auth_list, "Username", username, &editor->username_entry, editor);
+    create_password_row(auth_list, "Password", password, pw_flags,
+                       &editor->password_entry, &editor->password_storage_combo, editor);
     
     /* Login type - combo with entry for custom values */
     static const char *login_type_options[] = {
@@ -683,16 +819,18 @@ build_editor_widget(SnxEditor *editor, NMConnection *connection)
         "ma"
     };
     create_combo_row(auth_list, "Login Type", login_type,
-                     login_type_options, login_type_ids, 4, TRUE, &editor->login_type_combo);
+                     login_type_options, login_type_ids, 4, TRUE, &editor->login_type_combo, editor);
     
     /* Cert type dropdown */
     static const char *cert_type_options[] = { "None", "PKCS#12", "PKCS#8", "PKCS#11" };
     static const char *cert_type_ids[] = { "none", "pkcs12", "pkcs8", "pkcs11" };
     create_combo_row(auth_list, "Certificate Type", cert_type,
-                     cert_type_options, cert_type_ids, 4, FALSE, &editor->cert_type_combo);
+                     cert_type_options, cert_type_ids, 4, FALSE, &editor->cert_type_combo, editor);
     
-    create_entry_row(auth_list, "Certificate Path", cert_path, &editor->cert_path_entry);
-    create_entry_row(auth_list, "Certificate ID (PKCS#11)", cert_id, &editor->cert_id_entry);
+    create_entry_row(auth_list, "Certificate Path", cert_path, &editor->cert_path_entry, editor);
+    create_entry_row(auth_list, "Certificate ID (PKCS#11)", cert_id, &editor->cert_id_entry, editor);
+    create_entry_row(auth_list, "CA Certificates", ca_cert, &editor->ca_cert_entry, editor);
+    create_switch_row(auth_list, "Ignore server certificate errors", ignore_server_cert, &editor->ignore_server_cert_switch, editor);
     gtk_box_append(GTK_BOX(box), auth_list);
     
     /* === Tunnel section === */
@@ -702,49 +840,39 @@ build_editor_widget(SnxEditor *editor, NMConnection *connection)
     static const char *tunnel_type_options[] = { "IPSec", "SSL" };
     static const char *tunnel_type_ids[] = { "ipsec", "ssl" };
     create_combo_row(tunnel_list, "Tunnel Type", tunnel_type,
-                     tunnel_type_options, tunnel_type_ids, 2, FALSE, &editor->tunnel_type_combo);
+                     tunnel_type_options, tunnel_type_ids, 2, FALSE, &editor->tunnel_type_combo, editor);
     
     /* Transport type dropdown */
     static const char *transport_type_options[] = { "Auto-detect", "Kernel", "UDP", "TCP Transport" };
     static const char *transport_type_ids[] = { "auto", "kernel", "udp", "tcpt" };
     create_combo_row(tunnel_list, "Transport Type", transport_type,
-                     transport_type_options, transport_type_ids, 4, FALSE, &editor->transport_type_combo);
+                     transport_type_options, transport_type_ids, 4, FALSE, &editor->transport_type_combo, editor);
     
-    create_spin_row(tunnel_list, "MTU", mtu, 576, 9000, &editor->mtu_spin);
-    create_switch_row(tunnel_list, "Persist IKE Session", ike_persist, &editor->ike_persist_switch);
-    create_switch_row(tunnel_list, "Disable Keepalive", no_keepalive, &editor->no_keepalive_switch);
+    create_spin_row(tunnel_list, "MTU", mtu, 576, 9000, &editor->mtu_spin, editor);
+    create_switch_row(tunnel_list, "Persist IKE Session", ike_persist, &editor->ike_persist_switch, editor);
+    create_switch_row(tunnel_list, "Disable Keepalive", no_keepalive, &editor->no_keepalive_switch, editor);
     gtk_box_append(GTK_BOX(box), tunnel_list);
     
     /* === Routing section === */
     CREATE_SECTION("Routing", route_list);
-    create_switch_row(route_list, "Use as default route", default_route, &editor->default_route_switch);
-    create_switch_row(route_list, "Disable all routing", no_routing, &editor->no_routing_switch);
-    create_entry_row(route_list, "Additional routes", add_routes, &editor->add_routes_entry);
-    create_entry_row(route_list, "Ignore routes", ignore_routes, &editor->ignore_routes_entry);
+    create_switch_row(route_list, "Use as default route", default_route, &editor->default_route_switch, editor);
+    create_entry_row(route_list, "Additional routes", add_routes, &editor->add_routes_entry, editor);
+    create_entry_row(route_list, "Ignore routes", ignore_routes, &editor->ignore_routes_entry, editor);
     gtk_box_append(GTK_BOX(box), route_list);
     
     /* === DNS section === */
     CREATE_SECTION("DNS", dns_list);
-    create_switch_row(dns_list, "Do not configure DNS", no_dns, &editor->no_dns_switch);
-    create_entry_row(dns_list, "DNS Servers", dns_servers, &editor->dns_servers_entry);
-    create_entry_row(dns_list, "Search domains", search_domains, &editor->search_domains_entry);
-    create_entry_row(dns_list, "Ignore search domains", ignore_search_domains, &editor->ignore_search_domains_entry);
-    create_entry_row(dns_list, "Ignore DNS servers", ignore_dns_servers, &editor->ignore_dns_servers_entry);
+    create_entry_row(dns_list, "DNS Servers", dns_servers, &editor->dns_servers_entry, editor);
+    create_entry_row(dns_list, "Search domains", search_domains, &editor->search_domains_entry, editor);
+    create_entry_row(dns_list, "Ignore search domains", ignore_search_domains, &editor->ignore_search_domains_entry, editor);
+    create_entry_row(dns_list, "Ignore DNS servers", ignore_dns_servers, &editor->ignore_dns_servers_entry, editor);
     gtk_box_append(GTK_BOX(box), dns_list);
-    
-    /* === Security section === */
-    CREATE_SECTION("Security", sec_list);
-    create_switch_row(sec_list, "Do not use keychain", no_keychain, &editor->no_keychain_switch);
-    create_switch_row(sec_list, "Ignore server certificate errors", ignore_server_cert, &editor->ignore_server_cert_switch);
-    create_entry_row(sec_list, "CA Certificates", ca_cert, &editor->ca_cert_entry);
-    gtk_box_append(GTK_BOX(box), sec_list);
     
     /* === Advanced section === */
     CREATE_SECTION("Advanced", adv_list);
-    create_spin_row(adv_list, "IKE Lifetime (seconds)", ike_lifetime, 300, 86400, &editor->ike_lifetime_spin);
-    create_switch_row(adv_list, "Disable IPv6", disable_ipv6, &editor->disable_ipv6_switch);
-    create_switch_row(adv_list, "Port Knock", port_knock, &editor->port_knock_switch);
-    create_switch_row(adv_list, "Set Routing Domains", set_routing_domains, &editor->set_routing_domains_switch);
+    create_spin_row(adv_list, "IKE Lifetime (seconds)", ike_lifetime, 300, 86400, &editor->ike_lifetime_spin, editor);
+    create_switch_row(adv_list, "Disable IPv6", disable_ipv6, &editor->disable_ipv6_switch, editor);
+    create_switch_row(adv_list, "Port Knock", port_knock, &editor->port_knock_switch, editor);
     gtk_box_append(GTK_BOX(box), adv_list);
     
     #undef CREATE_SECTION
@@ -802,12 +930,23 @@ snx_editor_update_connection(NMVpnEditor *iface, NMConnection *connection, GErro
     else
         nm_setting_vpn_remove_data_item(s_vpn, SNX_KEY_SERVER);
     
-    /* Username */
+    /* Username - use the NMSettingVpn's built-in user-name property */
     text = gtk_editable_get_text(GTK_EDITABLE(editor->username_entry));
-    if (text && *text)
-        nm_setting_vpn_add_data_item(s_vpn, SNX_KEY_USERNAME, text);
-    else
-        nm_setting_vpn_remove_data_item(s_vpn, SNX_KEY_USERNAME);
+    if (text && *text) {
+        g_object_set(G_OBJECT(s_vpn), NM_SETTING_VPN_USER_NAME, text, NULL);
+    } else {
+        g_object_set(G_OBJECT(s_vpn), NM_SETTING_VPN_USER_NAME, NULL, NULL);
+    }
+    
+    /* Password - use secrets API for secure storage */
+    text = gtk_editable_get_text(GTK_EDITABLE(editor->password_entry));
+    const char *flags_id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(editor->password_storage_combo));
+    NMSettingSecretFlags pw_flags = flags_id ? (NMSettingSecretFlags)atoi(flags_id) : NM_SETTING_SECRET_FLAG_AGENT_OWNED;
+    
+    if (text && *text && pw_flags != NM_SETTING_SECRET_FLAG_NOT_REQUIRED) {
+        nm_setting_vpn_add_secret(s_vpn, SNX_KEY_PASSWORD, text);
+    }
+    nm_setting_set_secret_flags(NM_SETTING(s_vpn), SNX_KEY_PASSWORD, pw_flags, NULL);
     
     /* Login type (combo with entry) */
     text = get_combo_value(editor->login_type_combo);
@@ -900,15 +1039,6 @@ snx_editor_update_connection(NMVpnEditor *iface, NMConnection *connection, GErro
     val = gtk_switch_get_active(GTK_SWITCH(editor->default_route_switch));
     nm_setting_vpn_add_data_item(s_vpn, SNX_KEY_DEFAULT_ROUTE, val ? "true" : "false");
     
-    val = gtk_switch_get_active(GTK_SWITCH(editor->no_routing_switch));
-    nm_setting_vpn_add_data_item(s_vpn, SNX_KEY_NO_ROUTING, val ? "true" : "false");
-    
-    val = gtk_switch_get_active(GTK_SWITCH(editor->no_dns_switch));
-    nm_setting_vpn_add_data_item(s_vpn, SNX_KEY_NO_DNS, val ? "true" : "false");
-    
-    val = gtk_switch_get_active(GTK_SWITCH(editor->no_keychain_switch));
-    nm_setting_vpn_add_data_item(s_vpn, SNX_KEY_NO_KEYCHAIN, val ? "true" : "false");
-    
     val = gtk_switch_get_active(GTK_SWITCH(editor->ignore_server_cert_switch));
     nm_setting_vpn_add_data_item(s_vpn, SNX_KEY_IGNORE_SERVER_CERT, val ? "true" : "false");
     
@@ -923,9 +1053,6 @@ snx_editor_update_connection(NMVpnEditor *iface, NMConnection *connection, GErro
     
     val = gtk_switch_get_active(GTK_SWITCH(editor->port_knock_switch));
     nm_setting_vpn_add_data_item(s_vpn, SNX_KEY_PORT_KNOCK, val ? "true" : "false");
-    
-    val = gtk_switch_get_active(GTK_SWITCH(editor->set_routing_domains_switch));
-    nm_setting_vpn_add_data_item(s_vpn, SNX_KEY_SET_ROUTING_DOMAINS, val ? "true" : "false");
     
     /* Integer values */
     char buf[32];
