@@ -529,8 +529,6 @@ create_password_row(GtkWidget *list, const char *label_text, const char *value,
     GtkWidget *storage_combo = gtk_combo_box_text_new();
     gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(storage_combo), "0", "Save for all users");
     gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(storage_combo), "1", "Save for this user");
-    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(storage_combo), "2", "Ask always");
-    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(storage_combo), "4", "Not required");
     
     /* Set layout */
     gtk_widget_set_halign(label, GTK_ALIGN_START);
