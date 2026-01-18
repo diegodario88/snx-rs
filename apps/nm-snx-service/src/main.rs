@@ -52,18 +52,16 @@ struct PendingAuth {
 /// Extract password-flags from vpn.data settings.
 /// Returns 0 (NONE/system stored), 1 (AGENT_OWNED/keyring), 2 (NOT_SAVED/ask always), or 4 (NOT_REQUIRED).
 fn extract_password_flags(settings: &HashMap<String, HashMap<String, zvariant::OwnedValue>>) -> u32 {
-    if let Some(vpn) = settings.get("vpn") {
-        if let Some(data) = vpn.get("data") {
-            if let Ok(dict) = data.downcast_ref::<zvariant::Dict<'_, '_>>() {
-                for (k, v) in dict.iter() {
-                    if let Ok(key) = k.downcast_ref::<zvariant::Str>() {
-                        if key.as_str() == "password-flags" {
-                            if let Ok(val) = v.downcast_ref::<zvariant::Str>() {
-                                return val.as_str().parse().unwrap_or(0);
-                            }
-                        }
-                    }
-                }
+    if let Some(vpn) = settings.get("vpn")
+        && let Some(data) = vpn.get("data")
+        && let Ok(dict) = data.downcast_ref::<zvariant::Dict<'_, '_>>()
+    {
+        for (k, v) in dict.iter() {
+            if let Ok(key) = k.downcast_ref::<zvariant::Str>()
+                && key.as_str() == "password-flags"
+                && let Ok(val) = v.downcast_ref::<zvariant::Str>()
+            {
+                return val.as_str().parse().unwrap_or(0);
             }
         }
     }

@@ -174,12 +174,12 @@ async fn find_subnets_for_mark(mark: &str) -> Vec<Ipv4Net> {
     for line in output.lines().skip(2) {
         // Look for MARK rules with our specific mark value
         // Example: "MARK       all  --  0.0.0.0/0            172.16.0.0/16        MARK set 0x6f"
-        if line.trim_start().starts_with("MARK") && line.contains(mark) {
-            if let Some(dest) = extract_destination_from_rule(line) {
-                if let Ok(subnet) = dest.parse::<Ipv4Net>() {
-                    subnets.push(subnet);
-                }
-            }
+        if line.trim_start().starts_with("MARK")
+            && line.contains(mark)
+            && let Some(dest) = extract_destination_from_rule(line)
+            && let Ok(subnet) = dest.parse::<Ipv4Net>()
+        {
+            subnets.push(subnet);
         }
     }
 

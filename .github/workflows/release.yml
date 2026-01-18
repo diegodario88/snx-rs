@@ -48,7 +48,7 @@ jobs:
 
           if [ -z "$CHANGELOG" ]; then
             if [[ "$TAG_NAME" == *"-test"* ]]; then
-              CHANGELOG="Test build: Automaticaly generated notes for $TAG_NAME"
+              CHANGELOG="Test build: Automatically generated notes for $TAG_NAME"
             else
               echo "Error: No changelog entries found for $TAG_NAME"
               exit 1
@@ -71,21 +71,21 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           source $HOME/.cargo/env
 
-      # - name: Build project
-      #   run: |
-      #     chmod +x package/build-lto.sh
-      #     ./package/build-lto.sh --features=vendored-openssl,vendored-sqlite
+      - name: Build project
+        run: |
+          chmod +x package/build-lto.sh
+          ./package/build-lto.sh --features=vendored-openssl,vendored-sqlite
 
-      # - name: Package project
-      #   run: |
-      #     chmod +x package/package.sh
-      #     ./package/package.sh
+      - name: Package project
+        run: |
+          chmod +x package/package.sh
+          ./package/package.sh
 
-      # - name: Build project with mobile-access feature
-      #   run: ./package/build-lto.sh --features=vendored-openssl,vendored-sqlite,mobile-access
+      - name: Build project with mobile-access feature
+        run: ./package/build-lto.sh --features=vendored-openssl,vendored-sqlite,mobile-access
 
-      # - name: Package project with mobile-access feature
-      #   run: ./package/package.sh -webkit
+      - name: Package project with mobile-access feature
+        run: ./package/package.sh -webkit
 
       - name: Build NetworkManager plugin
         run: |
@@ -99,8 +99,8 @@ jobs:
 
       - name: List generated packages
         run: |
-          echo "Looking for .deb files in target/:"
-          ls -la target/*.deb || echo "No .deb files found"
+          echo "Looking for packages in target/:"
+          ls -la target/*.tar.xz target/*.run target/*.deb target/*.rpm 2>/dev/null || echo "Some packages not found"
 
       - name: Create Release
         uses: actions/github-script@v7
@@ -124,17 +124,43 @@ jobs:
               prerelease: false
             });
 
+            // Upload original snx-rs artifacts
+            for (const suffix of suffixes) {
+              for (const extension of extensions) {
+                if ((extension === "deb" || extension === "rpm") && suffix === "-webkit") continue;
+
+                const artifactName = `snx-rs-${tagName}${suffix}-linux-x86_64.${extension}`;
+                const artifactPath = `target/${artifactName}`;
+                try {
+                  const artifact = fs.readFileSync(artifactPath);
+                  await github.rest.repos.uploadReleaseAsset({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    release_id: release.data.id,
+                    name: artifactName,
+                    data: artifact
+                  });
+                } catch (e) {
+                  console.log(`Warning: Could not upload ${artifactName}: ${e.message}`);
+                }
+              }
+            }
+
             // Upload NetworkManager plugin .deb
             const nmPluginName = `networkmanager-snx-${tagName}-linux-x86_64.deb`;
             const nmPluginPath = `target/${nmPluginName}`;
-            const nmPlugin = fs.readFileSync(nmPluginPath);
-            await github.rest.repos.uploadReleaseAsset({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              release_id: release.data.id,
-              name: nmPluginName,
-              data: nmPlugin
-            });
+            try {
+              const nmPlugin = fs.readFileSync(nmPluginPath);
+              await github.rest.repos.uploadReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: release.data.id,
+                name: nmPluginName,
+                data: nmPlugin
+              });
+            } catch (e) {
+              console.log(`Warning: Could not upload ${nmPluginName}: ${e.message}`);
+            }
 
             if (tagName.endsWith("-test")) {
               await github.rest.repos.deleteRelease({
