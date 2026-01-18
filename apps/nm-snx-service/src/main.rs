@@ -1,6 +1,8 @@
 use crate::config::params_from_connection;
+use snxcore::browser::{BrowserController, SystemBrowser};
 use snxcore::model::params::TunnelParams;
-use snxcore::model::{SessionState, VpnSession};
+use snxcore::model::{MfaType, SessionState, VpnSession};
+use snxcore::otp::OtpListener;
 use snxcore::platform::{Keychain, Platform, PlatformAccess, set_no_device_config};
 use snxcore::tunnel::{TunnelCommand, TunnelConnector, TunnelEvent, new_tunnel_connector};
 use std::collections::HashMap;
@@ -492,7 +494,54 @@ impl VpnPlugin {
                     return self.complete_connection(connector, session, conn, params).await;
                 }
                 SessionState::PendingChallenge(challenge) => {
-                    info!("Challenge: '{}'", challenge.prompt);
+                    info!("Challenge: '{}' (type: {:?})", challenge.prompt, challenge.mfa_type);
+
+                    // Handle Identity Provider (SAML/SSO) authentication
+                    if challenge.mfa_type == MfaType::IdentityProvider {
+                        info!("Identity Provider authentication - opening system browser");
+
+                        let browser = SystemBrowser;
+                        if let Err(e) = browser.open(&challenge.prompt) {
+                            error!("Failed to open browser: {}", e);
+                            self.signal_failure_and_shutdown(ctx, NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED)
+                                .await;
+                            return Err(fdo::Error::Failed(format!("Failed to open browser: {}", e)));
+                        }
+
+                        info!("Waiting for OTP from browser callback (timeout: 120s)...");
+                        match OtpListener::new().await {
+                            Ok(listener) => match listener.acquire_otp().await {
+                                Ok(otp) => {
+                                    info!("Received OTP from browser callback");
+                                    match connector.challenge_code(session.clone(), &otp).await {
+                                        Ok(new_session) => {
+                                            session = new_session;
+                                        }
+                                        Err(e) => {
+                                            error!("Identity Provider authentication failed: {}", e);
+                                            self.signal_failure_and_shutdown(ctx, NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED)
+                                                .await;
+                                            return Err(fdo::Error::Failed(format!("IdP auth error: {}", e)));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to receive OTP from browser: {}", e);
+                                    self.signal_failure_and_shutdown(ctx, NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED)
+                                        .await;
+                                    return Err(fdo::Error::Failed(format!("OTP timeout or error: {}", e)));
+                                }
+                            },
+                            Err(e) => {
+                                error!("Failed to start OTP listener: {}", e);
+                                self.signal_failure_and_shutdown(ctx, NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED)
+                                    .await;
+                                return Err(fdo::Error::Failed(format!("OTP listener error: {}", e)));
+                            }
+                        }
+                        continue;
+                    }
+
                     let prompt_lower = challenge.prompt.to_lowercase();
 
                     if prompt_lower.contains("password") && !params.password.is_empty() {
