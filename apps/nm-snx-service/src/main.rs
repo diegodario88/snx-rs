@@ -23,7 +23,6 @@ const NM_VPN_SERVICE_STATE_STOPPED: u32 = 6;
 
 // NetworkManager VPN Plugin Failure reasons
 const NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED: u32 = 0;
-const NM_VPN_PLUGIN_FAILURE_CONNECT_FAILED: u32 = 1;
 
 struct VpnHandle {
     command_sender: mpsc::Sender<TunnelCommand>,
